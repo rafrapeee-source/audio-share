@@ -5,51 +5,136 @@ const path = require('path');
 
 const app = express();
 const server = http.createServer(app);
-const io = new Server(server);
+const io = new Server(server, {
+  cors: { origin: "*" }
+});
 
 app.use(express.static(path.join(__dirname, 'public')));
 
-// Keep track of active rooms and who the broadcaster is
+// Server-side state for rooms
 const rooms = {};
 
-io.on('connection', (socket) => {
-  console.log(`User connected: ${socket.id}`);
+// Helper to play next song in queue
+function playNext(roomId) {
+  const room = rooms[roomId];
+  if (!room) return;
 
+  if (room.queue.length > 0) {
+    room.currentTrack = room.queue.shift();
+    room.isPlaying = true;
+    io.to(roomId).emit('play-track', {
+      track: room.currentTrack,
+      queue: room.queue
+    });
+  } else {
+    room.currentTrack = null;
+    room.isPlaying = false;
+    io.to(roomId).emit('stop-track');
+  }
+}
+
+// YouTube Search API Endpoint (Avoids CORS issues on the client)
+app.get('/api/search', async (req, res) => {
+  try {
+    const query = req.query.q;
+    if (!query) return res.json([]);
+
+    const url = `https://www.youtube.com/results?search_query=${encodeURIComponent(query)}`;
+    const response = await fetch(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36'
+      }
+    });
+    
+    const html = await response.text();
+    
+    // Extract YouTube's raw state JSON from the page
+    const regex = /ytInitialData\s*=\s*({.+?});/;
+    const match = html.match(regex);
+    if (!match) return res.json([]);
+    
+    const data = JSON.parse(match[1]);
+    const contents = data.contents.twoColumnSearchResultsRenderer.primaryContents.sectionListRenderer.contents[0].itemSectionRenderer.contents;
+    
+    const results = [];
+    for (const item of contents) {
+      if (item.videoRenderer) {
+        const video = item.videoRenderer;
+        results.push({
+          videoId: video.videoId,
+          title: video.title.runs[0].text,
+          thumbnail: video.thumbnail.thumbnails[0].url,
+          duration: video.lengthText ? video.lengthText.simpleText : 'Unknown'
+        });
+      }
+      if (results.length >= 8) break; // Limit to top 8 results
+    }
+    
+    res.json(results);
+  } catch (error) {
+    console.error("Scraping error:", error);
+    res.status(500).json({ error: "Failed to fetch search results" });
+  }
+});
+
+// Socket Connections
+io.on('connection', (socket) => {
+  
   socket.on('create-room', (roomId) => {
-    rooms[roomId] = socket.id;
+    rooms[roomId] = {
+      hostId: socket.id,
+      queue: [],
+      currentTrack: null,
+      isPlaying: false
+    };
     socket.join(roomId);
-    console.log(`Room ${roomId} created by broadcaster: ${socket.id}`);
+    console.log(`Room ${roomId} created.`);
   });
 
   socket.on('join-room', (roomId) => {
-    if (rooms[roomId]) {
+    const room = rooms[roomId];
+    if (room) {
       socket.join(roomId);
-      // Notify the broadcaster that a new listener has joined
-      io.to(rooms[roomId]).emit('listener-joined', socket.id);
-      console.log(`Listener ${socket.id} joined room: ${roomId}`);
+      // Send the current player state and queue to the newly joined listener
+      socket.emit('sync-state', {
+        currentTrack: room.currentTrack,
+        queue: room.queue,
+        isPlaying: room.isPlaying
+      });
     } else {
       socket.emit('room-not-found');
     }
   });
 
-  // Relay WebRTC negotiation messages
-  socket.on('offer', (targetId, description) => {
-    io.to(targetId).emit('offer', socket.id, description);
+  socket.on('add-to-queue', (roomId, track) => {
+    const room = rooms[roomId];
+    if (!room) return;
+
+    room.queue.push(track);
+
+    if (!room.currentTrack) {
+      // Nothing is playing, start immediately
+      playNext(roomId);
+    } else {
+      // Just update queue list for everyone
+      io.to(roomId).emit('queue-updated', room.queue);
+    }
   });
 
-  socket.on('answer', (targetId, description) => {
-    io.to(targetId).emit('answer', socket.id, description);
+  socket.on('song-ended', (roomId) => {
+    const room = rooms[roomId];
+    if (!room) return;
+    
+    // Only trust the host to coordinate track progression
+    if (socket.id === room.hostId) {
+      playNext(roomId);
+    }
   });
 
-  socket.on('ice-candidate', (targetId, candidate) => {
-    io.to(targetId).emit('ice-candidate', socket.id, candidate);
-  });
-
-  socket.on('disconnect', () => {
-    console.log(`User disconnected: ${socket.id}`);
-    // If the broadcaster disconnected, clean up the room
-    for (const roomId in rooms) {
-      if (rooms[roomId] === socket.id) {
+  socket.on('disconnecting', () => {
+    for (const roomId of socket.rooms) {
+      const room = rooms[roomId];
+      if (room && room.hostId === socket.id) {
         delete rooms[roomId];
         io.to(roomId).emit('broadcaster-disconnected');
       }
@@ -58,6 +143,4 @@ io.on('connection', (socket) => {
 });
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => {
-  console.log(`Server is running on http://localhost:${PORT}`);
-});
+server.listen(PORT, () => console.log(`Server running on port ${PORT}`));

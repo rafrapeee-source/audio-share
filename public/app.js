@@ -1,227 +1,239 @@
 const socket = io();
 
-const selectionPanel = document.getElementById('selection-panel');
-const streamPanel = document.getElementById('stream-panel');
+// UI Elements
+const setupPanel = document.getElementById('setup-panel');
+const jukeboxView = document.getElementById('jukebox-view');
+const roomBadge = document.getElementById('room-badge');
+const displayRoomId = document.getElementById('display-room-id');
 const btnHost = document.getElementById('btn-host');
 const btnJoin = document.getElementById('btn-join');
 const btnLeave = document.getElementById('btn-leave');
 const inputRoomId = document.getElementById('input-room-id');
-const displayRoomId = document.getElementById('display-room-id');
-const streamStatus = document.getElementById('stream-status');
-const participantInfo = document.getElementById('participant-info');
-const remoteAudio = document.getElementById('remote-audio');
+const searchForm = document.getElementById('search-form');
+const searchInput = document.getElementById('search-input');
+const searchResults = document.getElementById('search-results');
+const nowPlayingInfo = document.getElementById('now-playing-info');
+const queueListElement = document.getElementById('queue-list');
+const volumeSlider = document.getElementById('volume-slider');
 
-let localStream = null;
-let peerConnections = {}; // Keyed by socket ID
 let currentRoomId = null;
 let role = null; // 'host' or 'listener'
+let ytPlayer = null;
+let isPlayerReady = false;
 
-// Standard ICE servers for basic NAT traversal
-const rtcConfig = {
-  iceServers: [
-    { urls: 'stun:stun.l.google.com:19302' },
-    { urls: 'stun:stun1.l.google.com:19302' }
-  ]
-};
+// Initialize YouTube Player API
+function onYouTubeIframeAPIReady() {
+  ytPlayer = new YT.Player('yt-player', {
+    host: 'https://www.youtube-nocookie.com', // <-- ADD THIS LINE
+    height: '100',
+    width: '100',
+    videoId: '', 
+    playerVars: {
+      autoplay: 1,
+      controls: 0,
+      disablekb: 1,
+      fs: 0,
+      rel: 0,
+      playsinline: 1
+    },
+    events: {
+      onReady: onPlayerReady,
+      onStateChange: onPlayerStateChange
+    }
+  });
+}
 
-// UI State Switcher
-function showStreamView(roomId, userRole) {
+function onPlayerReady(event) {
+  isPlayerReady = true;
+  ytPlayer.setVolume(volumeSlider.value);
+  // Suggest the lowest possible quality (144p/240p) to conserve background bandwidth
+  ytPlayer.setPlaybackQuality('small'); 
+}
+
+function onPlayerStateChange(event) {
+  // If the video ends and we are the host, coordinate playing the next track
+  if (event.data === YT.PlayerState.ENDED) {
+    if (role === 'host') {
+      socket.emit('song-ended', currentRoomId);
+    }
+  }
+}
+
+// Volume Controls
+volumeSlider.addEventListener('input', (e) => {
+  if (isPlayerReady && ytPlayer) {
+    ytPlayer.setVolume(e.target.value);
+  }
+});
+
+// UI View Transition
+function showJukeboxView(roomId, userRole) {
   currentRoomId = roomId;
   role = userRole;
-  selectionPanel.classList.add('hidden');
-  streamPanel.classList.remove('hidden');
+  setupPanel.classList.add('hidden');
+  jukeboxView.classList.remove('hidden');
+  roomBadge.classList.remove('hidden');
   displayRoomId.textContent = roomId;
-  
-  if (role === 'host') {
-    streamStatus.textContent = "Broadcasting Audio";
-    participantInfo.textContent = "0 listeners active";
-  } else {
-    streamStatus.textContent = "Listening to Stream";
-    participantInfo.textContent = "Connected to host";
-  }
 }
 
-// --- BROADCASTER / HOST LOGIC ---
-btnHost.addEventListener('click', async () => {
-  try {
-    // We capture video and audio via getDisplayMedia because desktop audio is usually tied to display sharing.
-    // We then extract only the audio track.
-    const displayStream = await navigator.mediaDevices.getDisplayMedia({
-      video: true, // Some browsers require video to be true to prompt for system audio
-      audio: {
-        echoCancellation: false,
-        noiseSuppression: false,
-        autoGainControl: false
-      }
-    });
-
-    const audioTracks = displayStream.getAudioTracks();
-    if (audioTracks.length === 0) {
-      // Clean up video stream if no audio was selected
-      displayStream.getTracks().forEach(track => track.stop());
-      alert("No audio track detected. Make sure to check the 'Share audio' option during screen sharing.");
-      return;
-    }
-
-    // Stop the video track as we only need the audio
-    displayStream.getVideoTracks().forEach(track => track.stop());
-
-    // Create a new stream containing only the audio track
-    localStream = new MediaStream([audioTracks[0]]);
-
-    // Generate a random 6-character room ID
-    const roomId = Math.random().toString(36).substring(2, 8).toUpperCase();
-    socket.emit('create-room', roomId);
-    showStreamView(roomId, 'host');
-
-  } catch (err) {
-    console.error("Error accessing screen/system audio:", err);
-    alert("Could not start broadcast. Screen sharing permissions are required.");
-  }
+// --- HOST ACTION ---
+btnHost.addEventListener('click', () => {
+  const roomId = Math.random().toString(36).substring(2, 8).toUpperCase();
+  socket.emit('create-room', roomId);
+  showJukeboxView(roomId, 'host');
 });
 
-// Host receives notification that a listener joined
-socket.on('listener-joined', async (listenerId) => {
-  const pc = new RTCPeerConnection(rtcConfig);
-  peerConnections[listenerId] = pc;
-
-  // Add our audio track to the connection
-  localStream.getTracks().forEach(track => {
-    pc.addTrack(track, localStream);
-  });
-
-  // Handle ICE candidates
-  pc.onicecandidate = (event) => {
-    if (event.candidate) {
-      socket.emit('ice-candidate', listenerId, event.candidate);
-    }
-  };
-
-  // Create WebRTC Offer
-  try {
-    const offer = await pc.createOffer();
-    await pc.setLocalDescription(offer);
-    socket.emit('offer', listenerId, pc.localDescription);
-    updateListenerCount();
-  } catch (err) {
-    console.error("Error creating WebRTC offer:", err);
-  }
-});
-
-// Host receives an answer from a listener
-socket.on('answer', async (listenerId, description) => {
-  const pc = peerConnections[listenerId];
-  if (pc) {
-    await pc.setRemoteDescription(new RTCSessionDescription(description));
-  }
-});
-
-function updateListenerCount() {
-  const count = Object.keys(peerConnections).length;
-  participantInfo.textContent = `${count} listener${count !== 1 ? 's' : ''} active`;
-}
-
-
-// --- LISTENER LOGIC ---
+// --- LISTENER ACTION ---
 btnJoin.addEventListener('click', () => {
   const roomId = inputRoomId.value.trim().toUpperCase();
   if (!roomId) return;
   socket.emit('join-room', roomId);
 });
 
-// Listener receives WebRTC Offer from Broadcaster
-socket.on('offer', async (broadcasterId, description) => {
-  showStreamView(inputRoomId.value.toUpperCase(), 'listener');
-  const pc = new RTCPeerConnection(rtcConfig);
-  peerConnections[broadcasterId] = pc;
+// --- SEARCH FORM ---
+searchForm.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const query = searchInput.value.trim();
+  if (!query) return;
 
-  pc.onicecandidate = (event) => {
-    if (event.candidate) {
-      socket.emit('ice-candidate', broadcasterId, event.candidate);
-    }
-  };
-
-  // When the audio track arrives, attach it to our audio player
-  pc.ontrack = (event) => {
-    remoteAudio.classList.remove('hidden');
-    if (remoteAudio.srcObject !== event.streams[0]) {
-      remoteAudio.srcObject = event.streams[0];
-    }
-  };
+  searchResults.innerHTML = '<p class="text-sm text-gray-400">Searching...</p>';
 
   try {
-    await pc.setRemoteDescription(new RTCSessionDescription(description));
-    const answer = await pc.createAnswer();
-    await pc.setLocalDescription(answer);
-    socket.emit('answer', broadcasterId, pc.localDescription);
-  } catch (err) {
-    console.error("Error setting up connection on listener end:", err);
+    const response = await fetch(`/api/search?q=${encodeURIComponent(query)}`);
+    const results = await response.json();
+    displaySearchResults(results);
+  } catch (error) {
+    console.error(error);
+    searchResults.innerHTML = '<p class="text-sm text-red-400">Search failed. Try again.</p>';
   }
 });
 
+function displaySearchResults(results) {
+  if (results.length === 0) {
+    searchResults.innerHTML = '<p class="text-sm text-gray-400">No results found.</p>';
+    return;
+  }
 
-// --- SHARED SIGNALING LOGIC ---
+  searchResults.innerHTML = '';
+  results.forEach(track => {
+    const item = document.createElement('div');
+    item.className = "flex items-center gap-3 p-2 bg-gray-700/30 border border-gray-700 rounded hover:bg-gray-700/50 transition";
+    item.innerHTML = `
+      <img src="${track.thumbnail}" class="w-12 h-9 object-cover rounded">
+      <div class="flex-1 min-w-0">
+        <p class="text-sm font-semibold text-white truncate">${track.title}</p>
+        <p class="text-xs text-gray-400">${track.duration}</p>
+      </div>
+      <button class="add-btn bg-indigo-600 hover:bg-indigo-500 text-xs font-bold py-1 px-3 rounded transition">
+        Queue
+      </button>
+    `;
 
-// Receive ICE candidate from peer
-socket.on('ice-candidate', async (senderId, candidate) => {
-  const pc = peerConnections[senderId];
-  if (pc) {
-    try {
-      await pc.addIceCandidate(new RTCIceCandidate(candidate));
-    } catch (err) {
-      console.error("Error adding received ICE candidate:", err);
-    }
+    item.querySelector('.add-btn').addEventListener('click', () => {
+      socket.emit('add-to-queue', currentRoomId, track);
+    });
+
+    searchResults.appendChild(item);
+  });
+}
+
+// --- SHARED REAL-TIME EVENTS ---
+
+// Sync complete room state for newly connected listeners
+socket.on('sync-state', (state) => {
+  showJukeboxView(inputRoomId.value.toUpperCase(), 'listener');
+  updateQueueUI(state.queue);
+  if (state.currentTrack && state.isPlaying) {
+    playVideo(state.currentTrack);
   }
 });
 
-// Handle disconnected users
-socket.on('user-disconnected', (userId) => {
-  if (peerConnections[userId]) {
-    peerConnections[userId].close();
-    delete peerConnections[userId];
-    if (role === 'host') {
-      updateListenerCount();
-    }
+// Play a track commanded by the server
+socket.on('play-track', (data) => {
+  playVideo(data.track);
+  updateQueueUI(data.queue);
+});
+
+// Queue update notification
+socket.on('queue-updated', (queue) => {
+  updateQueueUI(queue);
+});
+
+// Stop playing when the queue is completely empty
+socket.on('stop-track', () => {
+  if (isPlayerReady && ytPlayer) {
+    ytPlayer.stopVideo();
   }
+  nowPlayingInfo.innerHTML = '<p class="text-sm text-gray-400 italic">Queue is empty.</p>';
+});
+
+// Helper to run local hidden audio player
+function playVideo(track) {
+  if (isPlayerReady && ytPlayer) {
+    ytPlayer.loadVideoById({
+      videoId: track.videoId,
+      suggestedQuality: 'small' // Keep background video bandwidth use low
+    });
+    // Ensure quality is lowered once loading starts
+    ytPlayer.setPlaybackQuality('small');
+  }
+
+  nowPlayingInfo.innerHTML = `
+    <div class="flex items-center gap-3">
+      <img src="${track.thumbnail}" class="w-16 h-12 object-cover rounded border border-gray-700">
+      <div class="flex-1 min-w-0">
+        <p class="text-sm font-bold text-white truncate">${track.title}</p>
+        <p class="text-xs text-indigo-400">Now streaming</p>
+      </div>
+    </div>
+  `;
+}
+
+// Update the queue panel UI list
+function updateQueueUI(queue) {
+  if (queue.length === 0) {
+    queueListElement.innerHTML = '<p class="text-xs text-gray-500 italic">No songs queued.</p>';
+    return;
+  }
+
+  queueListElement.innerHTML = '';
+  queue.forEach((track, index) => {
+    const item = document.createElement('div');
+    item.className = "flex items-center gap-2 p-1.5 bg-gray-800/80 border border-gray-700 rounded";
+    item.innerHTML = `
+      <span class="text-xs text-gray-500 font-bold w-4 text-center">${index + 1}</span>
+      <img src="${track.thumbnail}" class="w-8 h-6 object-cover rounded">
+      <p class="text-xs text-gray-300 truncate flex-1">${track.title}</p>
+    `;
+    queueListElement.appendChild(item);
+  });
+}
+
+// Room exceptions / disconnect handling
+socket.on('room-not-found', () => {
+  alert("Room not found. Check the ID.");
 });
 
 socket.on('broadcaster-disconnected', () => {
-  alert("The broadcaster disconnected.");
+  alert("The host disconnected, closing room.");
   leaveRoom();
 });
 
-socket.on('room-not-found', () => {
-  alert("Room not found. Check the ID and try again.");
-});
-
-
-// --- LEAVE / CLEANUP ---
 btnLeave.addEventListener('click', leaveRoom);
 
 function leaveRoom() {
-  // Stop all local media tracks
-  if (localStream) {
-    localStream.getTracks().forEach(track => track.stop());
-    localStream = null;
+  if (isPlayerReady && ytPlayer) {
+    ytPlayer.stopVideo();
   }
-
-  // Close all peer connections
-  Object.keys(peerConnections).forEach(id => {
-    peerConnections[id].close();
-  });
-  peerConnections = {};
-
-  // Clean up audio element
-  remoteAudio.srcObject = null;
-  remoteAudio.classList.add('hidden');
-
-  // Reset UI
-  streamPanel.classList.add('hidden');
-  selectionPanel.classList.remove('hidden');
+  setupPanel.classList.remove('hidden');
+  jukeboxView.classList.add('hidden');
+  roomBadge.classList.add('hidden');
+  searchResults.innerHTML = '<p class="text-sm text-gray-500 italic">No search results yet.</p>';
+  nowPlayingInfo.innerHTML = '<p class="text-sm text-gray-400 italic">Queue is empty.</p>';
+  queueListElement.innerHTML = '<p class="text-xs text-gray-500 italic">No songs queued.</p>';
+  searchInput.value = '';
   inputRoomId.value = '';
   currentRoomId = null;
   role = null;
-
-  // Refresh page connections safely
   socket.emit('leave-room');
 }
