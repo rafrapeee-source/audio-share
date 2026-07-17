@@ -23,6 +23,7 @@ let currentVolume = volumeSlider.value;
 let lastTrackStartTime = 0; 
 let currentTrack = null;
 let driftCheckInterval = null;
+let keepAliveInterval = null;
 
 // UI View Transition
 function showJukeboxView(roomId, userRole) {
@@ -191,6 +192,7 @@ socket.on('sync-state', (state) => {
     }
   } else {
     stopDriftChecking();
+    stopKeepAlive();
   }
 });
 
@@ -207,6 +209,7 @@ socket.on('stop-track', () => {
   ytPlayerIframe.src = '';
   currentTrack = null;
   stopDriftChecking();
+  stopKeepAlive();
   nowPlayingInfo.innerHTML = '<p class="text-sm text-gray-400 italic">Queue is empty.</p>';
 });
 
@@ -239,6 +242,7 @@ function playVideo(track, startSecond = 0) {
   `;
 
   startDriftChecking();
+  startKeepAlive();
 }
 
 function updateQueueUI(queue) {
@@ -323,11 +327,43 @@ function stopDriftChecking() {
   }
 }
 
+// Keep-alive: while a track is actively playing, ping a plain HTTP endpoint
+// every few minutes so Render's free-tier instance doesn't spin down mid-song.
+// This intentionally does NOT run when nothing is playing — an idle room
+// with no music should be allowed to sleep normally.
+//
+// Reliability note: background tabs get their JS timers throttled, but
+// Chrome/Firefox exempt tabs that are (a) playing audible audio and/or
+// (b) holding an open WebSocket — this app has both, so this interval
+// should keep firing even while backgrounded. If a listener mutes the
+// player entirely, the audio exemption may not apply, but the open
+// socket.io WebSocket connection alone is generally enough to avoid the
+// most aggressive throttling tiers.
+const KEEP_ALIVE_INTERVAL_MS = 3 * 60 * 1000; // well under Render's 15-min timeout, with margin
+
+function startKeepAlive() {
+  if (keepAliveInterval) return; // already running
+  keepAliveInterval = setInterval(() => {
+    fetch('/healthz').catch(() => {
+      // Ignore failures — if the server is unreachable there's nothing
+      // to keep alive anyway; the next drift-check/reconnect will surface it.
+    });
+  }, KEEP_ALIVE_INTERVAL_MS);
+}
+
+function stopKeepAlive() {
+  if (keepAliveInterval) {
+    clearInterval(keepAliveInterval);
+    keepAliveInterval = null;
+  }
+}
+
 btnLeave.addEventListener('click', leaveRoom);
 
 function leaveRoom() {
   ytPlayerIframe.src = '';
   stopDriftChecking();
+  stopKeepAlive();
   setupPanel.classList.remove('hidden');
   jukeboxView.classList.add('hidden');
   roomBadge.classList.add('hidden');

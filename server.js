@@ -11,6 +11,14 @@ const io = new Server(server, {
 
 app.use(express.static(path.join(__dirname, 'public')));
 
+// Lightweight endpoint clients ping via plain HTTP while a track is playing.
+// A real HTTP request (not just WebSocket traffic) is the safest way to make
+// sure Render's activity detector counts this as "the app is in use" and
+// doesn't spin the free-tier instance down mid-song.
+app.get('/healthz', (req, res) => {
+  res.status(200).send('ok');
+});
+
 // Server-side state for rooms
 const rooms = {};
 
