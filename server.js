@@ -22,11 +22,26 @@ app.get('/healthz', (req, res) => {
 // Server-side state for rooms
 const rooms = {};
 
+// Parses YouTube's "duration" string (e.g. "3:45", "1:02:33") into seconds.
+// Falls back to a generous default if missing/unparseable, since we still
+// want an advance timer even for tracks with unknown length.
+function parseDurationToSeconds(durationStr) {
+  if (!durationStr || typeof durationStr !== 'string') return null;
+  const parts = durationStr.split(':').map(p => parseInt(p, 10));
+  if (parts.some(isNaN)) return null;
+
+  let seconds = 0;
+  for (const part of parts) {
+    seconds = seconds * 60 + part;
+  }
+  return seconds;
+}
+
 function playNext(roomId) {
   const room = rooms[roomId];
   if (!room) return;
 
-  // Clear any pending backstop timer from the previous track
+  // Clear any pending advance timer from the previous track
   if (room.advanceTimer) {
     clearTimeout(room.advanceTimer);
     room.advanceTimer = null;
@@ -42,20 +57,26 @@ function playNext(roomId) {
       queue: room.queue
     });
 
-    // Backstop: if the host's tab is idle/throttled and never reports
-    // 'song-ended', the server advances the queue on its own after a
-    // generous max duration so the room doesn't stall for everyone else.
-    // (We don't have exact durations from search results, so this is a
-    // safety net, not the primary advance mechanism.)
-    const MAX_TRACK_MS = 10 * 60 * 1000; // 10 minutes, generous ceiling
+    // Server-driven auto-advance: this is now the PRIMARY way the queue
+    // advances, not a fallback. Client-reported 'song-ended' (when a tab
+    // is active/foregrounded) can still trigger an earlier advance as a
+    // fast-path, but we can't rely on any browser tab being active/focused
+    // to fire that event — backgrounded tabs routinely fail to report
+    // 'ended' at all, which is exactly what was causing songs to stall
+    // until someone tabbed back in.
+    const durationSeconds = parseDurationToSeconds(room.currentTrack.duration);
+    // Small buffer (2s) past the actual duration so a slightly slow-loading
+    // client doesn't get cut off before it even reaches the true end.
+    const advanceMs = durationSeconds ? (durationSeconds + 2) * 1000 : 10 * 60 * 1000;
+
     const trackAtTimerStart = room.currentTrack.videoId;
     room.advanceTimer = setTimeout(() => {
       const stillCurrent = room.currentTrack && room.currentTrack.videoId === trackAtTimerStart;
       if (stillCurrent) {
-        console.log(`[Room ${roomId}] Backstop advance fired (host likely idle/throttled).`);
+        console.log(`[Room ${roomId}] Auto-advancing after ${Math.round(advanceMs / 1000)}s (duration-based timer).`);
         playNext(roomId);
       }
-    }, MAX_TRACK_MS);
+    }, advanceMs);
   } else {
     room.currentTrack = null;
     room.isPlaying = false;

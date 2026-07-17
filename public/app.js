@@ -24,6 +24,15 @@ let lastTrackStartTime = 0;
 let currentTrack = null;
 let driftCheckInterval = null;
 let keepAliveInterval = null;
+let playerTimePollInterval = null;
+
+// Real playback position as reported by the YouTube iframe itself (via
+// getCurrentTime), not our own timer guess. Updated whenever the iframe
+// answers a getCurrentTime request. `playerTimeUpdatedAt` is the local
+// Date.now() when that reading arrived, so we can extrapolate a couple
+// seconds forward if a fresh reading hasn't come in yet.
+let lastKnownPlayerTime = null;
+let playerTimeUpdatedAt = 0;
 
 // UI View Transition
 function showJukeboxView(roomId, userRole) {
@@ -121,6 +130,13 @@ function sendPlayerHandshake(event) {
   }
 }
 
+// Ask the YouTube iframe for its actual current playback position. The
+// answer comes back asynchronously as an 'infoDelivery' message and is
+// captured in the window 'message' listener below (info.currentTime).
+function requestPlayerTime() {
+  sendPlayerCommand('getCurrentTime');
+}
+
 // --- DETECT WHEN SONG ENDS ---
 
 window.addEventListener('message', (event) => {
@@ -132,7 +148,15 @@ window.addEventListener('message', (event) => {
       } else {
         data = event.data;
       }
-      
+
+      // Capture the real playback position whenever the iframe reports one.
+      // This is what lets drift-checking compare against actual video
+      // position instead of just our own wall-clock estimate.
+      if (data && data.event === 'infoDelivery' && data.info && typeof data.info.currentTime === 'number') {
+        lastKnownPlayerTime = data.info.currentTime;
+        playerTimeUpdatedAt = Date.now();
+      }
+
       let isEnded = false;
 
       // Check standard and raw message formats
@@ -179,11 +203,11 @@ socket.on('sync-state', (state) => {
       // noticeably; otherwise reloading the iframe every resync would cause
       // audible stutter for no benefit.
       const expectedElapsed = state.elapsedSeconds;
-      const localElapsed = Math.floor((Date.now() - lastTrackStartTime) / 1000);
+      const localElapsed = getLocalPlaybackPosition();
       const driftSeconds = Math.abs(expectedElapsed - localElapsed);
 
       if (driftSeconds > 3) {
-        console.log(`Drift detected (${driftSeconds}s). Reseeking...`);
+        console.log(`Drift detected (${driftSeconds}s, using ${lastKnownPlayerTime !== null ? 'real player time' : 'wall-clock estimate'}). Reseeking...`);
         playVideo(state.currentTrack, expectedElapsed);
       } else {
         // Still in sync — just make sure the drift-check loop keeps running.
@@ -213,6 +237,20 @@ socket.on('stop-track', () => {
   nowPlayingInfo.innerHTML = '<p class="text-sm text-gray-400 italic">Queue is empty.</p>';
 });
 
+// Best estimate of "what second is this listener's player actually on".
+// Prefers a real getCurrentTime() reading from the iframe (extrapolated
+// forward by however long it's been since that reading arrived, since
+// readings are only refreshed periodically). Falls back to the pure
+// wall-clock guess if we don't have a real reading yet (e.g. right after
+// a fresh load, before the iframe has answered its first getCurrentTime).
+function getLocalPlaybackPosition() {
+  if (lastKnownPlayerTime !== null) {
+    const secondsSinceReading = (Date.now() - playerTimeUpdatedAt) / 1000;
+    return lastKnownPlayerTime + secondsSinceReading;
+  }
+  return (Date.now() - lastTrackStartTime) / 1000;
+}
+
 function playVideo(track, startSecond = 0) {
   const myOrigin = window.location.origin;
   
@@ -221,6 +259,12 @@ function playVideo(track, startSecond = 0) {
   
   // Adjust the cooldown lock based on how far into the song we are starting
   lastTrackStartTime = Date.now() - (startSecond * 1000);
+
+  // Reset real-player-time tracking — any reading we had was for whatever
+  // was playing before, and would otherwise pollute the next drift check
+  // until a fresh getCurrentTime response comes back in.
+  lastKnownPlayerTime = null;
+  playerTimeUpdatedAt = 0;
 
   // We append &start=... to make the YouTube player jump directly to the synchronized second
   ytPlayerIframe.src = `https://www.youtube-nocookie.com/embed/${track.videoId}?autoplay=1&rel=0&enablejsapi=1&vq=small&start=${startSecond}&origin=${encodeURIComponent(myOrigin)}`;
@@ -278,6 +322,10 @@ socket.on('broadcaster-disconnected', () => {
 function requestFreshSync() {
   if (currentRoomId) {
     console.log("Requesting fresh sync from server...");
+    // Also ask the iframe for its real position right now, so by the time
+    // sync-state comes back we're comparing against as fresh a reading as
+    // possible rather than one that might be several seconds stale.
+    requestPlayerTime();
     socket.emit('request-sync', currentRoomId);
   }
 }
@@ -308,8 +356,8 @@ document.addEventListener('visibilitychange', () => {
 });
 
 // Periodic drift correction: every 15s while something is playing, compare
-// where the player *should* be (per lastTrackStartTime) against where it
-// likely drifted to, and nudge it back in line. This is what keeps everyone
+// where the player *should* be (per server truth) against where it likely
+// drifted to, and nudge it back in line. This is what keeps everyone
 // glued together over a long session, not just at the moment they join.
 function startDriftChecking() {
   stopDriftChecking();
@@ -318,12 +366,35 @@ function startDriftChecking() {
     if (!currentTrack || !ytPlayerIframe.contentWindow) return;
     requestFreshSync();
   }, 15000);
+  startPlayerTimePolling();
 }
 
 function stopDriftChecking() {
   if (driftCheckInterval) {
     clearInterval(driftCheckInterval);
     driftCheckInterval = null;
+  }
+  stopPlayerTimePolling();
+}
+
+// Keeps lastKnownPlayerTime fresh (every 3s) so that whenever a drift check
+// or resync happens, we're comparing against real player position instead
+// of a stale or purely theoretical wall-clock guess. This is the piece that
+// actually catches "buffered late so it's really behind" or "genuinely
+// running ahead" cases that timestamp math alone can't see.
+function startPlayerTimePolling() {
+  stopPlayerTimePolling();
+  playerTimePollInterval = setInterval(() => {
+    if (document.visibilityState !== 'visible') return;
+    if (!currentTrack || !ytPlayerIframe.contentWindow) return;
+    requestPlayerTime();
+  }, 3000);
+}
+
+function stopPlayerTimePolling() {
+  if (playerTimePollInterval) {
+    clearInterval(playerTimePollInterval);
+    playerTimePollInterval = null;
   }
 }
 
