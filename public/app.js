@@ -21,6 +21,7 @@ let currentRoomId = null;
 let role = null; // 'host' or 'listener'
 let currentVolume = volumeSlider.value;
 let lastTrackStartTime = 0; 
+let currentTrack = null;
 
 // UI View Transition
 function showJukeboxView(roomId, userRole) {
@@ -151,6 +152,42 @@ function sendPlayerHandshake(event) {
 // });
 
 // --- DETECT WHEN SONG ENDS ---
+// window.addEventListener('message', (event) => {
+//   if (event.origin === 'https://www.youtube-nocookie.com') {
+//     try {
+//       let data;
+//       if (typeof event.data === 'string') {
+//         data = JSON.parse(event.data);
+//       } else {
+//         data = event.data;
+//       }
+      
+//       let isEnded = false;
+
+//       // Check standard and raw message formats
+//       if (data && data.event === 'infoDelivery' && data.info && data.info.playerState === 0) {
+//         isEnded = true;
+//       } else if (data && data.event === 'onStateChange' && data.info === 0) {
+//         isEnded = true;
+//       }
+
+//       if (isEnded) {
+//         const now = Date.now();
+//         // Cooldown: Only allow "ended" trigger if the current song has been playing for at least 5 seconds
+//         if (now - lastTrackStartTime > 5000) {
+//           lastTrackStartTime = now; // Lock immediately to prevent double-triggers
+//           console.log("Song finished playing. Triggering next track...");
+//           if (role === 'host') {
+//             socket.emit('song-ended', currentRoomId);
+//           }
+//         }
+//       }
+//     } catch (err) {
+//       // Ignore
+//     }
+//   }
+// });
+
 window.addEventListener('message', (event) => {
   if (event.origin === 'https://www.youtube-nocookie.com') {
     try {
@@ -172,13 +209,12 @@ window.addEventListener('message', (event) => {
 
       if (isEnded) {
         const now = Date.now();
-        // Cooldown: Only allow "ended" trigger if the current song has been playing for at least 5 seconds
-        if (now - lastTrackStartTime > 5000) {
-          lastTrackStartTime = now; // Lock immediately to prevent double-triggers
-          console.log("Song finished playing. Triggering next track...");
-          if (role === 'host') {
-            socket.emit('song-ended', currentRoomId);
-          }
+        // Cooldown: Only allow ended triggers if the song has been playing for at least 5 seconds
+        if (now - lastTrackStartTime > 5000 && currentTrack) {
+          lastTrackStartTime = now;
+          console.log("Song finished. Notifying server...");
+          // Pass the specific videoId that ended to prevent double-skips on the server
+          socket.emit('song-ended', currentRoomId, currentTrack.videoId);
         }
       }
     } catch (err) {
@@ -237,21 +273,47 @@ socket.on('stop-track', () => {
 //   `;
 // }
 
+// function playVideo(track) {
+//   const myOrigin = window.location.origin;
+  
+//   // Record the start time immediately to activate the cooldown lock
+//   lastTrackStartTime = Date.now();
+
+//   // enablejsapi=1 AND origin=... are both required to authorize cross-domain messages
+//   ytPlayerIframe.src = `https://www.youtube-nocookie.com/embed/${track.videoId}?autoplay=1&rel=0&enablejsapi=1&vq=small&origin=${encodeURIComponent(myOrigin)}`;
+
+//   ytPlayerIframe.onload = () => {
+//     // Establish the API connection handshakes (Wake up the iframe listener)
+//     sendPlayerHandshake('listening');
+//     sendPlayerCommand('addEventListener', ['onStateChange']);
+    
+//     // Set the current slider volume
+//     sendPlayerCommand('setVolume', [currentVolume]);
+//   };
+
+//   nowPlayingInfo.innerHTML = `
+//     <div class="flex items-center gap-3">
+//       <img src="${track.thumbnail}" class="w-16 h-12 object-cover rounded border border-gray-700">
+//       <div class="flex-1 min-w-0">
+//         <p class="text-sm font-bold text-white truncate">${track.title}</p>
+//         <p class="text-xs text-indigo-400">Now streaming</p>
+//       </div>
+//     </div>
+//   `;
+// }
+
 function playVideo(track) {
   const myOrigin = window.location.origin;
   
-  // Record the start time immediately to activate the cooldown lock
+  // Store the active track locally
+  currentTrack = track; // <-- ADD THIS LINE
   lastTrackStartTime = Date.now();
 
-  // enablejsapi=1 AND origin=... are both required to authorize cross-domain messages
   ytPlayerIframe.src = `https://www.youtube-nocookie.com/embed/${track.videoId}?autoplay=1&rel=0&enablejsapi=1&vq=small&origin=${encodeURIComponent(myOrigin)}`;
 
   ytPlayerIframe.onload = () => {
-    // Establish the API connection handshakes (Wake up the iframe listener)
     sendPlayerHandshake('listening');
     sendPlayerCommand('addEventListener', ['onStateChange']);
-    
-    // Set the current slider volume
     sendPlayerCommand('setVolume', [currentVolume]);
   };
 

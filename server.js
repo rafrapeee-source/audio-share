@@ -126,9 +126,17 @@ io.on('connection', (socket) => {
   });
 
   // Host notifies the server that the track ended; server triggers next track
-  socket.on('song-ended', (roomId) => {
+  // socket.on('song-ended', (roomId) => {
+  //   const room = rooms[roomId];
+  //   if (room && socket.id === room.hostId) {
+  //     playNext(roomId);
+  //   }
+  // });
+
+  socket.on('song-ended', (roomId, endedVideoId) => {
     const room = rooms[roomId];
-    if (room && socket.id === room.hostId) {
+    if (room && room.currentTrack && room.currentTrack.videoId === endedVideoId) {
+      console.log(`[Room ${roomId}] Confirmed song ended for video: ${endedVideoId}. Advancing queue...`);
       playNext(roomId);
     }
   });
