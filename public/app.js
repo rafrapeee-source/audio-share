@@ -129,30 +129,35 @@ function sendPlayerCommand(func, args = []) {
 //   }
 // });
 
+// --- DETECT WHEN SONG ENDS ---
 window.addEventListener('message', (event) => {
   if (event.origin === 'https://www.youtube-nocookie.com') {
     try {
-      const data = JSON.parse(event.data);
+      // Safely handle both pre-parsed objects and raw JSON strings
+      let data;
+      if (typeof event.data === 'string') {
+        data = JSON.parse(event.data);
+      } else {
+        data = event.data;
+      }
       
       let isEnded = false;
 
-      // 1. Check raw iframe message structure
-      if (data.event === 'infoDelivery' && data.info && data.info.playerState === 0) {
+      // Check the raw iframe structures safely
+      if (data && data.event === 'infoDelivery' && data.info && data.info.playerState === 0) {
         isEnded = true;
-      }
-      // 2. Fallback check for alternative API wrapper formats
-      else if (data.event === 'onStateChange' && data.info === 0) {
+      } else if (data && data.event === 'onStateChange' && data.info === 0) {
         isEnded = true;
       }
 
       if (isEnded) {
-        console.log("Song ended detected. Requesting next track...");
+        console.log("Song ended successfully detected.");
         if (role === 'host') {
           socket.emit('song-ended', currentRoomId);
         }
       }
     } catch (err) {
-      // Ignore irrelevant or non-JSON messages from other browser extensions
+      // Ignore parsing errors from unrelated messages
     }
   }
 });
@@ -182,11 +187,34 @@ socket.on('stop-track', () => {
 });
 
 // Play a track by swapping the iframe source using purely youtube-nocookie
-function playVideo(track) {
-  // enablejsapi=1 tells the iframe to send us playback status update messages
-  ytPlayerIframe.src = `https://www.youtube-nocookie.com/embed/${track.videoId}?autoplay=1&rel=0&enablejsapi=1&vq=small`;
+// function playVideo(track) {
+//   // enablejsapi=1 tells the iframe to send us playback status update messages
+//   ytPlayerIframe.src = `https://www.youtube-nocookie.com/embed/${track.videoId}?autoplay=1&rel=0&enablejsapi=1&vq=small`;
 
-  // We set the initial volume once the iframe reloads
+//   // We set the initial volume once the iframe reloads
+//   ytPlayerIframe.onload = () => {
+//     sendPlayerCommand('setVolume', [currentVolume]);
+//   };
+
+//   nowPlayingInfo.innerHTML = `
+//     <div class="flex items-center gap-3">
+//       <img src="${track.thumbnail}" class="w-16 h-12 object-cover rounded border border-gray-700">
+//       <div class="flex-1 min-w-0">
+//         <p class="text-sm font-bold text-white truncate">${track.title}</p>
+//         <p class="text-xs text-indigo-400">Now streaming</p>
+//       </div>
+//     </div>
+//   `;
+// }
+
+function playVideo(track) {
+  // We dynamically capture the current website's URL (localhost or Render domain)
+  const myOrigin = window.location.origin;
+  
+  // enablejsapi=1 AND origin=... are both required to authorize cross-domain messages
+  ytPlayerIframe.src = `https://www.youtube-nocookie.com/embed/${track.videoId}?autoplay=1&rel=0&enablejsapi=1&vq=small&origin=${encodeURIComponent(myOrigin)}`;
+
+  // Set the initial volume once the iframe reloads
   ytPlayerIframe.onload = () => {
     sendPlayerCommand('setVolume', [currentVolume]);
   };
