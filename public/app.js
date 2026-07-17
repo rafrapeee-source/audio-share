@@ -225,11 +225,23 @@ window.addEventListener('message', (event) => {
 
 // --- SHARED REAL-TIME EVENTS ---
 
+// socket.on('sync-state', (state) => {
+//   showJukeboxView(inputRoomId.value.toUpperCase(), 'listener');
+//   updateQueueUI(state.queue);
+//   if (state.currentTrack && state.isPlaying) {
+//     playVideo(state.currentTrack);
+//   }
+// });
+
 socket.on('sync-state', (state) => {
-  showJukeboxView(inputRoomId.value.toUpperCase(), 'listener');
+  // Safe fallback to grab the active Room ID
+  const activeRoomId = currentRoomId || inputRoomId.value.toUpperCase();
+  showJukeboxView(activeRoomId, 'listener');
   updateQueueUI(state.queue);
+  
   if (state.currentTrack && state.isPlaying) {
-    playVideo(state.currentTrack);
+    // Play the song starting at the calculated elapsed seconds
+    playVideo(state.currentTrack, state.elapsedSeconds);
   }
 });
 
@@ -302,14 +314,43 @@ socket.on('stop-track', () => {
 //   `;
 // }
 
-function playVideo(track) {
+// function playVideo(track) {
+//   const myOrigin = window.location.origin;
+  
+//   // Store the active track locally
+//   currentTrack = track; // <-- ADD THIS LINE
+//   lastTrackStartTime = Date.now();
+
+//   ytPlayerIframe.src = `https://www.youtube-nocookie.com/embed/${track.videoId}?autoplay=1&rel=0&enablejsapi=1&vq=small&origin=${encodeURIComponent(myOrigin)}`;
+
+//   ytPlayerIframe.onload = () => {
+//     sendPlayerHandshake('listening');
+//     sendPlayerCommand('addEventListener', ['onStateChange']);
+//     sendPlayerCommand('setVolume', [currentVolume]);
+//   };
+
+//   nowPlayingInfo.innerHTML = `
+//     <div class="flex items-center gap-3">
+//       <img src="${track.thumbnail}" class="w-16 h-12 object-cover rounded border border-gray-700">
+//       <div class="flex-1 min-w-0">
+//         <p class="text-sm font-bold text-white truncate">${track.title}</p>
+//         <p class="text-xs text-indigo-400">Now streaming</p>
+//       </div>
+//     </div>
+//   `;
+// }
+
+function playVideo(track, startSecond = 0) {
   const myOrigin = window.location.origin;
   
   // Store the active track locally
-  currentTrack = track; // <-- ADD THIS LINE
-  lastTrackStartTime = Date.now();
+  currentTrack = track;
+  
+  // Adjust the cooldown lock based on how far into the song we are starting
+  lastTrackStartTime = Date.now() - (startSecond * 1000);
 
-  ytPlayerIframe.src = `https://www.youtube-nocookie.com/embed/${track.videoId}?autoplay=1&rel=0&enablejsapi=1&vq=small&origin=${encodeURIComponent(myOrigin)}`;
+  // We append &start=... to make the YouTube player jump directly to the synchronized second
+  ytPlayerIframe.src = `https://www.youtube-nocookie.com/embed/${track.videoId}?autoplay=1&rel=0&enablejsapi=1&vq=small&start=${startSecond}&origin=${encodeURIComponent(myOrigin)}`;
 
   ytPlayerIframe.onload = () => {
     sendPlayerHandshake('listening');
@@ -354,6 +395,13 @@ socket.on('room-not-found', () => {
 socket.on('broadcaster-disconnected', () => {
   alert("The host disconnected, closing room.");
   leaveRoom();
+});
+
+socket.on('connect', () => {
+  if (currentRoomId) {
+    console.log("Reconnected to server. Syncing room state...");
+    socket.emit('join-room', currentRoomId);
+  }
 });
 
 btnLeave.addEventListener('click', leaveRoom);

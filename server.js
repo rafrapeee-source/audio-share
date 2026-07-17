@@ -15,6 +15,25 @@ app.use(express.static(path.join(__dirname, 'public')));
 const rooms = {};
 
 // Helper to play next song in queue
+// function playNext(roomId) {
+//   const room = rooms[roomId];
+//   if (!room) return;
+
+//   if (room.queue.length > 0) {
+//     room.currentTrack = room.queue.shift();
+//     room.isPlaying = true;
+    
+//     io.to(roomId).emit('play-track', {
+//       track: room.currentTrack,
+//       queue: room.queue
+//     });
+//   } else {
+//     room.currentTrack = null;
+//     room.isPlaying = false;
+//     io.to(roomId).emit('stop-track');
+//   }
+// }
+
 function playNext(roomId) {
   const room = rooms[roomId];
   if (!room) return;
@@ -22,6 +41,7 @@ function playNext(roomId) {
   if (room.queue.length > 0) {
     room.currentTrack = room.queue.shift();
     room.isPlaying = true;
+    room.trackStartTime = Date.now(); // <-- Record the exact start time of the track
     
     io.to(roomId).emit('play-track', {
       track: room.currentTrack,
@@ -30,6 +50,7 @@ function playNext(roomId) {
   } else {
     room.currentTrack = null;
     room.isPlaying = false;
+    room.trackStartTime = null;
     io.to(roomId).emit('stop-track');
   }
 }
@@ -89,14 +110,36 @@ io.on('connection', (socket) => {
     socket.join(roomId);
   });
 
+  // socket.on('join-room', (roomId) => {
+  //   const room = rooms[roomId];
+  //   if (room) {
+  //     socket.join(roomId);
+  //     socket.emit('sync-state', {
+  //       currentTrack: room.currentTrack,
+  //       queue: room.queue,
+  //       isPlaying: room.isPlaying
+  //     });
+  //   } else {
+  //     socket.emit('room-not-found');
+  //   }
+  // });
+
   socket.on('join-room', (roomId) => {
     const room = rooms[roomId];
     if (room) {
       socket.join(roomId);
+      
+      // Calculate how many seconds have elapsed since the track started
+      let elapsedSeconds = 0;
+      if (room.trackStartTime) {
+        elapsedSeconds = Math.floor((Date.now() - room.trackStartTime) / 1000);
+      }
+
       socket.emit('sync-state', {
         currentTrack: room.currentTrack,
         queue: room.queue,
-        isPlaying: room.isPlaying
+        isPlaying: room.isPlaying,
+        elapsedSeconds: elapsedSeconds // <-- Send the current playback position
       });
     } else {
       socket.emit('room-not-found');
