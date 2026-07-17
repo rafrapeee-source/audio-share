@@ -113,18 +113,46 @@ function sendPlayerCommand(func, args = []) {
 // --- DETECT WHEN SONG ENDS ---
 // The iframe natively sends messages back to our main window.
 // We listen for the 'onStateChange' message indicating the video has ended (value: 0).
+// window.addEventListener('message', (event) => {
+//   if (event.origin === 'https://www.youtube-nocookie.com') {
+//     try {
+//       const data = JSON.parse(event.data);
+//       // state 0 is "ENDED"
+//       if (data.event === 'onStateChange' && data.info === 0) {
+//         if (role === 'host') {
+//           socket.emit('song-ended', currentRoomId);
+//         }
+//       }
+//     } catch (err) {
+//       // Ignore irrelevant messages from other scripts
+//     }
+//   }
+// });
+
 window.addEventListener('message', (event) => {
   if (event.origin === 'https://www.youtube-nocookie.com') {
     try {
       const data = JSON.parse(event.data);
-      // state 0 is "ENDED"
-      if (data.event === 'onStateChange' && data.info === 0) {
+      
+      let isEnded = false;
+
+      // 1. Check raw iframe message structure
+      if (data.event === 'infoDelivery' && data.info && data.info.playerState === 0) {
+        isEnded = true;
+      }
+      // 2. Fallback check for alternative API wrapper formats
+      else if (data.event === 'onStateChange' && data.info === 0) {
+        isEnded = true;
+      }
+
+      if (isEnded) {
+        console.log("Song ended detected. Requesting next track...");
         if (role === 'host') {
           socket.emit('song-ended', currentRoomId);
         }
       }
     } catch (err) {
-      // Ignore irrelevant messages from other scripts
+      // Ignore irrelevant or non-JSON messages from other browser extensions
     }
   }
 });
