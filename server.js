@@ -107,6 +107,11 @@ io.on('connection', (socket) => {
     const room = rooms[roomId];
     if (!room) return;
 
+    if (room.queue.length >= 50) {
+      socket.emit('queue-full-error', 'The queue is full! Wait for some songs to finish.');
+      return;
+    }
+
     room.queue.push(track);
 
     if (!room.currentTrack) {
@@ -114,6 +119,10 @@ io.on('connection', (socket) => {
     } else {
       io.to(roomId).emit('queue-updated', room.queue);
     }
+  });
+
+  socket.on('queue-full-error', (message) => {
+    alert(message);
   });
 
   // Host notifies the server that the track ended; server triggers next track
