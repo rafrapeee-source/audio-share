@@ -15,56 +15,11 @@ const searchResults = document.getElementById('search-results');
 const nowPlayingInfo = document.getElementById('now-playing-info');
 const queueListElement = document.getElementById('queue-list');
 const volumeSlider = document.getElementById('volume-slider');
+const ytPlayerIframe = document.getElementById('yt-player');
 
 let currentRoomId = null;
 let role = null; // 'host' or 'listener'
-let ytPlayer = null;
-let isPlayerReady = false;
-
-// Initialize YouTube Player API
-function onYouTubeIframeAPIReady() {
-  ytPlayer = new YT.Player('yt-player', {
-    host: 'https://www.youtube-nocookie.com', // <-- ADD THIS LINE
-    height: '100',
-    width: '100',
-    videoId: '', 
-    playerVars: {
-      autoplay: 1,
-      controls: 0,
-      disablekb: 1,
-      fs: 0,
-      rel: 0,
-      playsinline: 1
-    },
-    events: {
-      onReady: onPlayerReady,
-      onStateChange: onPlayerStateChange
-    }
-  });
-}
-
-function onPlayerReady(event) {
-  isPlayerReady = true;
-  ytPlayer.setVolume(volumeSlider.value);
-  // Suggest the lowest possible quality (144p/240p) to conserve background bandwidth
-  ytPlayer.setPlaybackQuality('small'); 
-}
-
-function onPlayerStateChange(event) {
-  // If the video ends and we are the host, coordinate playing the next track
-  if (event.data === YT.PlayerState.ENDED) {
-    if (role === 'host') {
-      socket.emit('song-ended', currentRoomId);
-    }
-  }
-}
-
-// Volume Controls
-volumeSlider.addEventListener('input', (e) => {
-  if (isPlayerReady && ytPlayer) {
-    ytPlayer.setVolume(e.target.value);
-  }
-});
+let currentVolume = volumeSlider.value;
 
 // UI View Transition
 function showJukeboxView(roomId, userRole) {
@@ -99,6 +54,8 @@ searchForm.addEventListener('submit', async (e) => {
   searchResults.innerHTML = '<p class="text-sm text-gray-400">Searching...</p>';
 
   try {
+    // The search is routed to your Render backend, which fetches the results.
+    // Since Render is not on your blocked local network, it can access YouTube easily.
     const response = await fetch(`/api/search?q=${encodeURIComponent(query)}`);
     const results = await response.json();
     displaySearchResults(results);
@@ -137,9 +94,43 @@ function displaySearchResults(results) {
   });
 }
 
+// --- VOLUME CONTROLS (Controlled via postMessage API) ---
+volumeSlider.addEventListener('input', (e) => {
+  currentVolume = e.target.value;
+  sendPlayerCommand('setVolume', [currentVolume]);
+});
+
+function sendPlayerCommand(func, args = []) {
+  if (ytPlayerIframe && ytPlayerIframe.contentWindow) {
+    ytPlayerIframe.contentWindow.postMessage(JSON.stringify({
+      event: 'command',
+      func: func,
+      args: args
+    }), 'https://www.youtube-nocookie.com');
+  }
+}
+
+// --- DETECT WHEN SONG ENDS ---
+// The iframe natively sends messages back to our main window.
+// We listen for the 'onStateChange' message indicating the video has ended (value: 0).
+window.addEventListener('message', (event) => {
+  if (event.origin === 'https://www.youtube-nocookie.com') {
+    try {
+      const data = JSON.parse(event.data);
+      // state 0 is "ENDED"
+      if (data.event === 'onStateChange' && data.info === 0) {
+        if (role === 'host') {
+          socket.emit('song-ended', currentRoomId);
+        }
+      }
+    } catch (err) {
+      // Ignore irrelevant messages from other scripts
+    }
+  }
+});
+
 // --- SHARED REAL-TIME EVENTS ---
 
-// Sync complete room state for newly connected listeners
 socket.on('sync-state', (state) => {
   showJukeboxView(inputRoomId.value.toUpperCase(), 'listener');
   updateQueueUI(state.queue);
@@ -148,35 +139,29 @@ socket.on('sync-state', (state) => {
   }
 });
 
-// Play a track commanded by the server
 socket.on('play-track', (data) => {
   playVideo(data.track);
   updateQueueUI(data.queue);
 });
 
-// Queue update notification
 socket.on('queue-updated', (queue) => {
   updateQueueUI(queue);
 });
 
-// Stop playing when the queue is completely empty
 socket.on('stop-track', () => {
-  if (isPlayerReady && ytPlayer) {
-    ytPlayer.stopVideo();
-  }
+  ytPlayerIframe.src = '';
   nowPlayingInfo.innerHTML = '<p class="text-sm text-gray-400 italic">Queue is empty.</p>';
 });
 
-// Helper to run local hidden audio player
+// Play a track by swapping the iframe source using purely youtube-nocookie
 function playVideo(track) {
-  if (isPlayerReady && ytPlayer) {
-    ytPlayer.loadVideoById({
-      videoId: track.videoId,
-      suggestedQuality: 'small' // Keep background video bandwidth use low
-    });
-    // Ensure quality is lowered once loading starts
-    ytPlayer.setPlaybackQuality('small');
-  }
+  // enablejsapi=1 tells the iframe to send us playback status update messages
+  ytPlayerIframe.src = `https://www.youtube-nocookie.com/embed/${track.videoId}?autoplay=1&rel=0&enablejsapi=1&vq=small`;
+
+  // We set the initial volume once the iframe reloads
+  ytPlayerIframe.onload = () => {
+    sendPlayerCommand('setVolume', [currentVolume]);
+  };
 
   nowPlayingInfo.innerHTML = `
     <div class="flex items-center gap-3">
@@ -189,7 +174,6 @@ function playVideo(track) {
   `;
 }
 
-// Update the queue panel UI list
 function updateQueueUI(queue) {
   if (queue.length === 0) {
     queueListElement.innerHTML = '<p class="text-xs text-gray-500 italic">No songs queued.</p>';
@@ -209,7 +193,6 @@ function updateQueueUI(queue) {
   });
 }
 
-// Room exceptions / disconnect handling
 socket.on('room-not-found', () => {
   alert("Room not found. Check the ID.");
 });
@@ -222,9 +205,7 @@ socket.on('broadcaster-disconnected', () => {
 btnLeave.addEventListener('click', leaveRoom);
 
 function leaveRoom() {
-  if (isPlayerReady && ytPlayer) {
-    ytPlayer.stopVideo();
-  }
+  ytPlayerIframe.src = '';
   setupPanel.classList.remove('hidden');
   jukeboxView.classList.add('hidden');
   roomBadge.classList.add('hidden');
