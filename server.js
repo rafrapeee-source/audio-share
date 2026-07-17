@@ -14,45 +14,63 @@ app.use(express.static(path.join(__dirname, 'public')));
 // Server-side state for rooms
 const rooms = {};
 
-// Helper to play next song in queue
-// function playNext(roomId) {
-//   const room = rooms[roomId];
-//   if (!room) return;
-
-//   if (room.queue.length > 0) {
-//     room.currentTrack = room.queue.shift();
-//     room.isPlaying = true;
-    
-//     io.to(roomId).emit('play-track', {
-//       track: room.currentTrack,
-//       queue: room.queue
-//     });
-//   } else {
-//     room.currentTrack = null;
-//     room.isPlaying = false;
-//     io.to(roomId).emit('stop-track');
-//   }
-// }
-
 function playNext(roomId) {
   const room = rooms[roomId];
   if (!room) return;
+
+  // Clear any pending backstop timer from the previous track
+  if (room.advanceTimer) {
+    clearTimeout(room.advanceTimer);
+    room.advanceTimer = null;
+  }
 
   if (room.queue.length > 0) {
     room.currentTrack = room.queue.shift();
     room.isPlaying = true;
     room.trackStartTime = Date.now(); // <-- Record the exact start time of the track
-    
+
     io.to(roomId).emit('play-track', {
       track: room.currentTrack,
       queue: room.queue
     });
+
+    // Backstop: if the host's tab is idle/throttled and never reports
+    // 'song-ended', the server advances the queue on its own after a
+    // generous max duration so the room doesn't stall for everyone else.
+    // (We don't have exact durations from search results, so this is a
+    // safety net, not the primary advance mechanism.)
+    const MAX_TRACK_MS = 10 * 60 * 1000; // 10 minutes, generous ceiling
+    const trackAtTimerStart = room.currentTrack.videoId;
+    room.advanceTimer = setTimeout(() => {
+      const stillCurrent = room.currentTrack && room.currentTrack.videoId === trackAtTimerStart;
+      if (stillCurrent) {
+        console.log(`[Room ${roomId}] Backstop advance fired (host likely idle/throttled).`);
+        playNext(roomId);
+      }
+    }, MAX_TRACK_MS);
   } else {
     room.currentTrack = null;
     room.isPlaying = false;
     room.trackStartTime = null;
     io.to(roomId).emit('stop-track');
   }
+}
+
+// Shared helper: compute current playback position and push full state to one socket.
+// Used both for fresh joins and for on-demand resyncs (e.g. tab woke up from idle).
+function sendSyncState(socket, room) {
+  let elapsedSeconds = 0;
+  if (room.trackStartTime) {
+    elapsedSeconds = Math.floor((Date.now() - room.trackStartTime) / 1000);
+  }
+
+  socket.emit('sync-state', {
+    currentTrack: room.currentTrack,
+    queue: room.queue,
+    isPlaying: room.isPlaying,
+    elapsedSeconds: elapsedSeconds,
+    serverTime: Date.now() // lets the client measure its own clock offset if needed
+  });
 }
 
 // YouTube Search API Endpoint
@@ -110,37 +128,23 @@ io.on('connection', (socket) => {
     socket.join(roomId);
   });
 
-  // socket.on('join-room', (roomId) => {
-  //   const room = rooms[roomId];
-  //   if (room) {
-  //     socket.join(roomId);
-  //     socket.emit('sync-state', {
-  //       currentTrack: room.currentTrack,
-  //       queue: room.queue,
-  //       isPlaying: room.isPlaying
-  //     });
-  //   } else {
-  //     socket.emit('room-not-found');
-  //   }
-  // });
-
   socket.on('join-room', (roomId) => {
     const room = rooms[roomId];
     if (room) {
       socket.join(roomId);
-      
-      // Calculate how many seconds have elapsed since the track started
-      let elapsedSeconds = 0;
-      if (room.trackStartTime) {
-        elapsedSeconds = Math.floor((Date.now() - room.trackStartTime) / 1000);
-      }
+      sendSyncState(socket, room);
+    } else {
+      socket.emit('room-not-found');
+    }
+  });
 
-      socket.emit('sync-state', {
-        currentTrack: room.currentTrack,
-        queue: room.queue,
-        isPlaying: room.isPlaying,
-        elapsedSeconds: elapsedSeconds // <-- Send the current playback position
-      });
+  // Any client (not just fresh joiners) can ask for a resync at any time.
+  // This is what lets a tab that went idle/backgrounded catch back up
+  // instead of only ever getting synced once at join time.
+  socket.on('request-sync', (roomId) => {
+    const room = rooms[roomId];
+    if (room) {
+      sendSyncState(socket, room);
     } else {
       socket.emit('room-not-found');
     }
@@ -168,14 +172,6 @@ io.on('connection', (socket) => {
     alert(message);
   });
 
-  // Host notifies the server that the track ended; server triggers next track
-  // socket.on('song-ended', (roomId) => {
-  //   const room = rooms[roomId];
-  //   if (room && socket.id === room.hostId) {
-  //     playNext(roomId);
-  //   }
-  // });
-
   socket.on('song-ended', (roomId, endedVideoId) => {
     const room = rooms[roomId];
     if (room && room.currentTrack && room.currentTrack.videoId === endedVideoId) {
@@ -188,6 +184,7 @@ io.on('connection', (socket) => {
     for (const roomId of socket.rooms) {
       const room = rooms[roomId];
       if (room && room.hostId === socket.id) {
+        if (room.advanceTimer) clearTimeout(room.advanceTimer);
         delete rooms[roomId];
         io.to(roomId).emit('broadcaster-disconnected');
       }

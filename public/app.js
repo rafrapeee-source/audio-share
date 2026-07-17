@@ -22,6 +22,7 @@ let role = null; // 'host' or 'listener'
 let currentVolume = volumeSlider.value;
 let lastTrackStartTime = 0; 
 let currentTrack = null;
+let driftCheckInterval = null;
 
 // UI View Transition
 function showJukeboxView(roomId, userRole) {
@@ -120,73 +121,6 @@ function sendPlayerHandshake(event) {
 }
 
 // --- DETECT WHEN SONG ENDS ---
-// window.addEventListener('message', (event) => {
-//   if (event.origin === 'https://www.youtube-nocookie.com') {
-//     try {
-//       let data;
-//       if (typeof event.data === 'string') {
-//         data = JSON.parse(event.data);
-//       } else {
-//         data = event.data;
-//       }
-      
-//       let isEnded = false;
-
-//       // Check standard and raw message formats
-//       if (data && data.event === 'infoDelivery' && data.info && data.info.playerState === 0) {
-//         isEnded = true;
-//       } else if (data && data.event === 'onStateChange' && data.info === 0) {
-//         isEnded = true;
-//       }
-
-//       if (isEnded) {
-//         console.log("Song finished playing.");
-//         if (role === 'host') {
-//           socket.emit('song-ended', currentRoomId);
-//         }
-//       }
-//     } catch (err) {
-//       // Ignore
-//     }
-//   }
-// });
-
-// --- DETECT WHEN SONG ENDS ---
-// window.addEventListener('message', (event) => {
-//   if (event.origin === 'https://www.youtube-nocookie.com') {
-//     try {
-//       let data;
-//       if (typeof event.data === 'string') {
-//         data = JSON.parse(event.data);
-//       } else {
-//         data = event.data;
-//       }
-      
-//       let isEnded = false;
-
-//       // Check standard and raw message formats
-//       if (data && data.event === 'infoDelivery' && data.info && data.info.playerState === 0) {
-//         isEnded = true;
-//       } else if (data && data.event === 'onStateChange' && data.info === 0) {
-//         isEnded = true;
-//       }
-
-//       if (isEnded) {
-//         const now = Date.now();
-//         // Cooldown: Only allow "ended" trigger if the current song has been playing for at least 5 seconds
-//         if (now - lastTrackStartTime > 5000) {
-//           lastTrackStartTime = now; // Lock immediately to prevent double-triggers
-//           console.log("Song finished playing. Triggering next track...");
-//           if (role === 'host') {
-//             socket.emit('song-ended', currentRoomId);
-//           }
-//         }
-//       }
-//     } catch (err) {
-//       // Ignore
-//     }
-//   }
-// });
 
 window.addEventListener('message', (event) => {
   if (event.origin === 'https://www.youtube-nocookie.com') {
@@ -225,23 +159,38 @@ window.addEventListener('message', (event) => {
 
 // --- SHARED REAL-TIME EVENTS ---
 
-// socket.on('sync-state', (state) => {
-//   showJukeboxView(inputRoomId.value.toUpperCase(), 'listener');
-//   updateQueueUI(state.queue);
-//   if (state.currentTrack && state.isPlaying) {
-//     playVideo(state.currentTrack);
-//   }
-// });
-
 socket.on('sync-state', (state) => {
   // Safe fallback to grab the active Room ID
   const activeRoomId = currentRoomId || inputRoomId.value.toUpperCase();
-  showJukeboxView(activeRoomId, 'listener');
+  // showJukeboxView is safe to call again on a resync — it just re-asserts
+  // the current view, it doesn't reset anything.
+  showJukeboxView(activeRoomId, role === 'host' ? 'host' : 'listener');
   updateQueueUI(state.queue);
-  
+
   if (state.currentTrack && state.isPlaying) {
-    // Play the song starting at the calculated elapsed seconds
-    playVideo(state.currentTrack, state.elapsedSeconds);
+    const isNewTrack = !currentTrack || currentTrack.videoId !== state.currentTrack.videoId;
+
+    if (isNewTrack) {
+      // Different (or first) track — load it fresh at the server's position.
+      playVideo(state.currentTrack, state.elapsedSeconds);
+    } else {
+      // Same track already playing locally. Only reseek if we've drifted
+      // noticeably; otherwise reloading the iframe every resync would cause
+      // audible stutter for no benefit.
+      const expectedElapsed = state.elapsedSeconds;
+      const localElapsed = Math.floor((Date.now() - lastTrackStartTime) / 1000);
+      const driftSeconds = Math.abs(expectedElapsed - localElapsed);
+
+      if (driftSeconds > 3) {
+        console.log(`Drift detected (${driftSeconds}s). Reseeking...`);
+        playVideo(state.currentTrack, expectedElapsed);
+      } else {
+        // Still in sync — just make sure the drift-check loop keeps running.
+        startDriftChecking();
+      }
+    }
+  } else {
+    stopDriftChecking();
   }
 });
 
@@ -256,89 +205,10 @@ socket.on('queue-updated', (queue) => {
 
 socket.on('stop-track', () => {
   ytPlayerIframe.src = '';
+  currentTrack = null;
+  stopDriftChecking();
   nowPlayingInfo.innerHTML = '<p class="text-sm text-gray-400 italic">Queue is empty.</p>';
 });
-
-// function playVideo(track) {
-//   const myOrigin = window.location.origin;
-  
-//   // enablejsapi=1 AND origin=... are both required to authorize cross-domain messages
-//   ytPlayerIframe.src = `https://www.youtube-nocookie.com/embed/${track.videoId}?autoplay=1&rel=0&enablejsapi=1&vq=small&origin=${encodeURIComponent(myOrigin)}`;
-
-//   ytPlayerIframe.onload = () => {
-//     // 1. Establish the API connection handshakes (Wake up the iframe listener)
-//     sendPlayerHandshake('listening');
-//     sendPlayerCommand('addEventListener', ['onStateChange']);
-    
-//     // 2. Set the current slider volume
-//     sendPlayerCommand('setVolume', [currentVolume]);
-//   };
-
-//   nowPlayingInfo.innerHTML = `
-//     <div class="flex items-center gap-3">
-//       <img src="${track.thumbnail}" class="w-16 h-12 object-cover rounded border border-gray-700">
-//       <div class="flex-1 min-w-0">
-//         <p class="text-sm font-bold text-white truncate">${track.title}</p>
-//         <p class="text-xs text-indigo-400">Now streaming</p>
-//       </div>
-//     </div>
-//   `;
-// }
-
-// function playVideo(track) {
-//   const myOrigin = window.location.origin;
-  
-//   // Record the start time immediately to activate the cooldown lock
-//   lastTrackStartTime = Date.now();
-
-//   // enablejsapi=1 AND origin=... are both required to authorize cross-domain messages
-//   ytPlayerIframe.src = `https://www.youtube-nocookie.com/embed/${track.videoId}?autoplay=1&rel=0&enablejsapi=1&vq=small&origin=${encodeURIComponent(myOrigin)}`;
-
-//   ytPlayerIframe.onload = () => {
-//     // Establish the API connection handshakes (Wake up the iframe listener)
-//     sendPlayerHandshake('listening');
-//     sendPlayerCommand('addEventListener', ['onStateChange']);
-    
-//     // Set the current slider volume
-//     sendPlayerCommand('setVolume', [currentVolume]);
-//   };
-
-//   nowPlayingInfo.innerHTML = `
-//     <div class="flex items-center gap-3">
-//       <img src="${track.thumbnail}" class="w-16 h-12 object-cover rounded border border-gray-700">
-//       <div class="flex-1 min-w-0">
-//         <p class="text-sm font-bold text-white truncate">${track.title}</p>
-//         <p class="text-xs text-indigo-400">Now streaming</p>
-//       </div>
-//     </div>
-//   `;
-// }
-
-// function playVideo(track) {
-//   const myOrigin = window.location.origin;
-  
-//   // Store the active track locally
-//   currentTrack = track; // <-- ADD THIS LINE
-//   lastTrackStartTime = Date.now();
-
-//   ytPlayerIframe.src = `https://www.youtube-nocookie.com/embed/${track.videoId}?autoplay=1&rel=0&enablejsapi=1&vq=small&origin=${encodeURIComponent(myOrigin)}`;
-
-//   ytPlayerIframe.onload = () => {
-//     sendPlayerHandshake('listening');
-//     sendPlayerCommand('addEventListener', ['onStateChange']);
-//     sendPlayerCommand('setVolume', [currentVolume]);
-//   };
-
-//   nowPlayingInfo.innerHTML = `
-//     <div class="flex items-center gap-3">
-//       <img src="${track.thumbnail}" class="w-16 h-12 object-cover rounded border border-gray-700">
-//       <div class="flex-1 min-w-0">
-//         <p class="text-sm font-bold text-white truncate">${track.title}</p>
-//         <p class="text-xs text-indigo-400">Now streaming</p>
-//       </div>
-//     </div>
-//   `;
-// }
 
 function playVideo(track, startSecond = 0) {
   const myOrigin = window.location.origin;
@@ -367,6 +237,8 @@ function playVideo(track, startSecond = 0) {
       </div>
     </div>
   `;
+
+  startDriftChecking();
 }
 
 function updateQueueUI(queue) {
@@ -397,17 +269,65 @@ socket.on('broadcaster-disconnected', () => {
   leaveRoom();
 });
 
+// Ask the server for the current authoritative state and reseek the player to match.
+// Called on: initial connect, socket reconnect, and tab becoming visible again.
+function requestFreshSync() {
+  if (currentRoomId) {
+    console.log("Requesting fresh sync from server...");
+    socket.emit('request-sync', currentRoomId);
+  }
+}
+
 socket.on('connect', () => {
   if (currentRoomId) {
     console.log("Reconnected to server. Syncing room state...");
+    // Host still needs join-room to (re)join the socket.io room server-side
+    // after a reconnect; listeners already have a room record, but re-joining
+    // is harmless and guarantees we're subscribed to broadcasts either way.
     socket.emit('join-room', currentRoomId);
   }
 });
+
+// Browser tabs get heavily throttled (or their socket silently dies) while
+// backgrounded. The moment the tab becomes visible again, force a resync
+// instead of trusting whatever state we were left in.
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && currentRoomId) {
+    // If the underlying socket dropped while hidden, socket.io will
+    // reconnect and our 'connect' handler above will also fire a sync.
+    // If it stayed connected the whole time, we still want to correct
+    // for drift accumulated while timers were throttled.
+    if (socket.connected) {
+      requestFreshSync();
+    }
+  }
+});
+
+// Periodic drift correction: every 15s while something is playing, compare
+// where the player *should* be (per lastTrackStartTime) against where it
+// likely drifted to, and nudge it back in line. This is what keeps everyone
+// glued together over a long session, not just at the moment they join.
+function startDriftChecking() {
+  stopDriftChecking();
+  driftCheckInterval = setInterval(() => {
+    if (document.visibilityState !== 'visible') return; // no point correcting while hidden
+    if (!currentTrack || !ytPlayerIframe.contentWindow) return;
+    requestFreshSync();
+  }, 15000);
+}
+
+function stopDriftChecking() {
+  if (driftCheckInterval) {
+    clearInterval(driftCheckInterval);
+    driftCheckInterval = null;
+  }
+}
 
 btnLeave.addEventListener('click', leaveRoom);
 
 function leaveRoom() {
   ytPlayerIframe.src = '';
+  stopDriftChecking();
   setupPanel.classList.remove('hidden');
   jukeboxView.classList.add('hidden');
   roomBadge.classList.add('hidden');
