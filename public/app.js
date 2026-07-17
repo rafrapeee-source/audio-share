@@ -54,8 +54,6 @@ searchForm.addEventListener('submit', async (e) => {
   searchResults.innerHTML = '<p class="text-sm text-gray-400">Searching...</p>';
 
   try {
-    // The search is routed to your Render backend, which fetches the results.
-    // Since Render is not on your blocked local network, it can access YouTube easily.
     const response = await fetch(`/api/search?q=${encodeURIComponent(query)}`);
     const results = await response.json();
     displaySearchResults(results);
@@ -110,58 +108,6 @@ function sendPlayerCommand(func, args = []) {
   }
 }
 
-// --- DETECT WHEN SONG ENDS ---
-// The iframe natively sends messages back to our main window.
-// We listen for the 'onStateChange' message indicating the video has ended (value: 0).
-// window.addEventListener('message', (event) => {
-//   if (event.origin === 'https://www.youtube-nocookie.com') {
-//     try {
-//       const data = JSON.parse(event.data);
-//       // state 0 is "ENDED"
-//       if (data.event === 'onStateChange' && data.info === 0) {
-//         if (role === 'host') {
-//           socket.emit('song-ended', currentRoomId);
-//         }
-//       }
-//     } catch (err) {
-//       // Ignore irrelevant messages from other scripts
-//     }
-//   }
-// });
-
-// --- DETECT WHEN SONG ENDS ---
-window.addEventListener('message', (event) => {
-  if (event.origin === 'https://www.youtube-nocookie.com') {
-    try {
-      // Safely handle both pre-parsed objects and raw JSON strings
-      let data;
-      if (typeof event.data === 'string') {
-        data = JSON.parse(event.data);
-      } else {
-        data = event.data;
-      }
-      
-      let isEnded = false;
-
-      // Check the raw iframe structures safely
-      if (data && data.event === 'infoDelivery' && data.info && data.info.playerState === 0) {
-        isEnded = true;
-      } else if (data && data.event === 'onStateChange' && data.info === 0) {
-        isEnded = true;
-      }
-
-      if (isEnded) {
-        console.log("Song ended successfully detected.");
-        if (role === 'host') {
-          socket.emit('song-ended', currentRoomId);
-        }
-      }
-    } catch (err) {
-      // Ignore parsing errors from unrelated messages
-    }
-  }
-});
-
 // --- SHARED REAL-TIME EVENTS ---
 
 socket.on('sync-state', (state) => {
@@ -186,33 +132,9 @@ socket.on('stop-track', () => {
   nowPlayingInfo.innerHTML = '<p class="text-sm text-gray-400 italic">Queue is empty.</p>';
 });
 
-// Play a track by swapping the iframe source using purely youtube-nocookie
-// function playVideo(track) {
-//   // enablejsapi=1 tells the iframe to send us playback status update messages
-//   ytPlayerIframe.src = `https://www.youtube-nocookie.com/embed/${track.videoId}?autoplay=1&rel=0&enablejsapi=1&vq=small`;
-
-//   // We set the initial volume once the iframe reloads
-//   ytPlayerIframe.onload = () => {
-//     sendPlayerCommand('setVolume', [currentVolume]);
-//   };
-
-//   nowPlayingInfo.innerHTML = `
-//     <div class="flex items-center gap-3">
-//       <img src="${track.thumbnail}" class="w-16 h-12 object-cover rounded border border-gray-700">
-//       <div class="flex-1 min-w-0">
-//         <p class="text-sm font-bold text-white truncate">${track.title}</p>
-//         <p class="text-xs text-indigo-400">Now streaming</p>
-//       </div>
-//     </div>
-//   `;
-// }
-
 function playVideo(track) {
-  // We dynamically capture the current website's URL (localhost or Render domain)
-  const myOrigin = window.location.origin;
-  
-  // enablejsapi=1 AND origin=... are both required to authorize cross-domain messages
-  ytPlayerIframe.src = `https://www.youtube-nocookie.com/embed/${track.videoId}?autoplay=1&rel=0&enablejsapi=1&vq=small&origin=${encodeURIComponent(myOrigin)}`;
+  // We no longer require enablejsapi or origin queries for queue tracking
+  ytPlayerIframe.src = `https://www.youtube-nocookie.com/embed/${track.videoId}?autoplay=1&rel=0&vq=small`;
 
   // Set the initial volume once the iframe reloads
   ytPlayerIframe.onload = () => {

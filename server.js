@@ -14,26 +14,68 @@ app.use(express.static(path.join(__dirname, 'public')));
 // Server-side state for rooms
 const rooms = {};
 
+// Helper to convert YouTube duration strings (e.g. "3:45", "1:02:15") to milliseconds
+function parseDurationToMs(durationStr) {
+  if (!durationStr || durationStr === 'Unknown') return 180000; // 3-minute fallback
+  
+  const parts = durationStr.split(':').map(Number);
+  let seconds = 0;
+  
+  if (parts.some(isNaN)) return 180000;
+
+  if (parts.length === 3) {
+    // HH:MM:SS
+    seconds = parts[0] * 3600 + parts[1] * 60 + parts[2];
+  } else if (parts.length === 2) {
+    // MM:SS
+    seconds = parts[0] * 60 + parts[1];
+  } else if (parts.length === 1) {
+    // SS
+    seconds = parts[0];
+  }
+  
+  // Add a 4-second buffer to account for YouTube load/buffering times
+  return (seconds + 4) * 1000; 
+}
+
 // Helper to play next song in queue
 function playNext(roomId) {
   const room = rooms[roomId];
   if (!room) return;
 
+  // Clear any existing timer for this room to avoid double-triggers
+  if (room.timeoutId) {
+    clearTimeout(room.timeoutId);
+    room.timeoutId = null;
+  }
+
   if (room.queue.length > 0) {
     room.currentTrack = room.queue.shift();
     room.isPlaying = true;
+    
     io.to(roomId).emit('play-track', {
       track: room.currentTrack,
       queue: room.queue
     });
+
+    // Set a timer on the server to automatically load the next song
+    const durationMs = parseDurationToMs(room.currentTrack.duration);
+    console.log(`[Room ${roomId}] Playing: "${room.currentTrack.title}". Duration: ${room.currentTrack.duration}. Timer set for ${durationMs / 1000}s`);
+    
+    room.timeoutId = setTimeout(() => {
+      console.log(`[Room ${roomId}] Track finished. Loading next track...`);
+      playNext(roomId);
+    }, durationMs);
+
   } else {
     room.currentTrack = null;
     room.isPlaying = false;
     io.to(roomId).emit('stop-track');
+    console.log(`[Room ${roomId}] Queue is empty. Player stopped.`);
   }
 }
 
-// YouTube Search API Endpoint (Avoids CORS issues on the client)
+// YouTube Search API Endpoint
 app.get('/api/search', async (req, res) => {
   try {
     const query = req.query.q;
@@ -47,8 +89,6 @@ app.get('/api/search', async (req, res) => {
     });
     
     const html = await response.text();
-    
-    // Extract YouTube's raw state JSON from the page
     const regex = /ytInitialData\s*=\s*({.+?});/;
     const match = html.match(regex);
     if (!match) return res.json([]);
@@ -67,7 +107,7 @@ app.get('/api/search', async (req, res) => {
           duration: video.lengthText ? video.lengthText.simpleText : 'Unknown'
         });
       }
-      if (results.length >= 8) break; // Limit to top 8 results
+      if (results.length >= 8) break;
     }
     
     res.json(results);
@@ -85,17 +125,16 @@ io.on('connection', (socket) => {
       hostId: socket.id,
       queue: [],
       currentTrack: null,
-      isPlaying: false
+      isPlaying: false,
+      timeoutId: null
     };
     socket.join(roomId);
-    console.log(`Room ${roomId} created.`);
   });
 
   socket.on('join-room', (roomId) => {
     const room = rooms[roomId];
     if (room) {
       socket.join(roomId);
-      // Send the current player state and queue to the newly joined listener
       socket.emit('sync-state', {
         currentTrack: room.currentTrack,
         queue: room.queue,
@@ -113,28 +152,20 @@ io.on('connection', (socket) => {
     room.queue.push(track);
 
     if (!room.currentTrack) {
-      // Nothing is playing, start immediately
       playNext(roomId);
     } else {
-      // Just update queue list for everyone
       io.to(roomId).emit('queue-updated', room.queue);
     }
   });
 
-  socket.on('song-ended', (roomId) => {
-    const room = rooms[roomId];
-    if (!room) return;
-    
-    // Only trust the host to coordinate track progression
-    if (socket.id === room.hostId) {
-      playNext(roomId);
-    }
-  });
-
+  // Listener disconnect cleanup
   socket.on('disconnecting', () => {
     for (const roomId of socket.rooms) {
       const room = rooms[roomId];
       if (room && room.hostId === socket.id) {
+        if (room.timeoutId) {
+          clearTimeout(room.timeoutId);
+        }
         delete rooms[roomId];
         io.to(roomId).emit('broadcaster-disconnected');
       }
