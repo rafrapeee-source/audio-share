@@ -92,7 +92,7 @@ function displaySearchResults(results) {
   });
 }
 
-// --- VOLUME CONTROLS (Controlled via postMessage API) ---
+// --- VOLUME & COMMANDS ---
 volumeSlider.addEventListener('input', (e) => {
   currentVolume = e.target.value;
   sendPlayerCommand('setVolume', [currentVolume]);
@@ -107,6 +107,47 @@ function sendPlayerCommand(func, args = []) {
     }), 'https://www.youtube-nocookie.com');
   }
 }
+
+// Send raw handshake event initialization directly to the window context
+function sendPlayerHandshake(event) {
+  if (ytPlayerIframe && ytPlayerIframe.contentWindow) {
+    ytPlayerIframe.contentWindow.postMessage(JSON.stringify({
+      event: event
+    }), 'https://www.youtube-nocookie.com');
+  }
+}
+
+// --- DETECT WHEN SONG ENDS ---
+window.addEventListener('message', (event) => {
+  if (event.origin === 'https://www.youtube-nocookie.com') {
+    try {
+      let data;
+      if (typeof event.data === 'string') {
+        data = JSON.parse(event.data);
+      } else {
+        data = event.data;
+      }
+      
+      let isEnded = false;
+
+      // Check standard and raw message formats
+      if (data && data.event === 'infoDelivery' && data.info && data.info.playerState === 0) {
+        isEnded = true;
+      } else if (data && data.event === 'onStateChange' && data.info === 0) {
+        isEnded = true;
+      }
+
+      if (isEnded) {
+        console.log("Song finished playing.");
+        if (role === 'host') {
+          socket.emit('song-ended', currentRoomId);
+        }
+      }
+    } catch (err) {
+      // Ignore
+    }
+  }
+});
 
 // --- SHARED REAL-TIME EVENTS ---
 
@@ -133,11 +174,17 @@ socket.on('stop-track', () => {
 });
 
 function playVideo(track) {
-  // We no longer require enablejsapi or origin queries for queue tracking
-  ytPlayerIframe.src = `https://www.youtube-nocookie.com/embed/${track.videoId}?autoplay=1&rel=0&vq=small`;
+  const myOrigin = window.location.origin;
+  
+  // enablejsapi=1 AND origin=... are both required to authorize cross-domain messages
+  ytPlayerIframe.src = `https://www.youtube-nocookie.com/embed/${track.videoId}?autoplay=1&rel=0&enablejsapi=1&vq=small&origin=${encodeURIComponent(myOrigin)}`;
 
-  // Set the initial volume once the iframe reloads
   ytPlayerIframe.onload = () => {
+    // 1. Establish the API connection handshakes (Wake up the iframe listener)
+    sendPlayerHandshake('listening');
+    sendPlayerCommand('addEventListener', ['onStateChange']);
+    
+    // 2. Set the current slider volume
     sendPlayerCommand('setVolume', [currentVolume]);
   };
 

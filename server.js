@@ -14,40 +14,10 @@ app.use(express.static(path.join(__dirname, 'public')));
 // Server-side state for rooms
 const rooms = {};
 
-// Helper to convert YouTube duration strings (e.g. "3:45", "1:02:15") to milliseconds
-function parseDurationToMs(durationStr) {
-  if (!durationStr || durationStr === 'Unknown') return 180000; // 3-minute fallback
-  
-  const parts = durationStr.split(':').map(Number);
-  let seconds = 0;
-  
-  if (parts.some(isNaN)) return 180000;
-
-  if (parts.length === 3) {
-    // HH:MM:SS
-    seconds = parts[0] * 3600 + parts[1] * 60 + parts[2];
-  } else if (parts.length === 2) {
-    // MM:SS
-    seconds = parts[0] * 60 + parts[1];
-  } else if (parts.length === 1) {
-    // SS
-    seconds = parts[0];
-  }
-  
-  // Add a 4-second buffer to account for YouTube load/buffering times
-  return (seconds + 4) * 1000; 
-}
-
 // Helper to play next song in queue
 function playNext(roomId) {
   const room = rooms[roomId];
   if (!room) return;
-
-  // Clear any existing timer for this room to avoid double-triggers
-  if (room.timeoutId) {
-    clearTimeout(room.timeoutId);
-    room.timeoutId = null;
-  }
 
   if (room.queue.length > 0) {
     room.currentTrack = room.queue.shift();
@@ -57,21 +27,10 @@ function playNext(roomId) {
       track: room.currentTrack,
       queue: room.queue
     });
-
-    // Set a timer on the server to automatically load the next song
-    const durationMs = parseDurationToMs(room.currentTrack.duration);
-    console.log(`[Room ${roomId}] Playing: "${room.currentTrack.title}". Duration: ${room.currentTrack.duration}. Timer set for ${durationMs / 1000}s`);
-    
-    room.timeoutId = setTimeout(() => {
-      console.log(`[Room ${roomId}] Track finished. Loading next track...`);
-      playNext(roomId);
-    }, durationMs);
-
   } else {
     room.currentTrack = null;
     room.isPlaying = false;
     io.to(roomId).emit('stop-track');
-    console.log(`[Room ${roomId}] Queue is empty. Player stopped.`);
   }
 }
 
@@ -125,8 +84,7 @@ io.on('connection', (socket) => {
       hostId: socket.id,
       queue: [],
       currentTrack: null,
-      isPlaying: false,
-      timeoutId: null
+      isPlaying: false
     };
     socket.join(roomId);
   });
@@ -158,14 +116,18 @@ io.on('connection', (socket) => {
     }
   });
 
-  // Listener disconnect cleanup
+  // Host notifies the server that the track ended; server triggers next track
+  socket.on('song-ended', (roomId) => {
+    const room = rooms[roomId];
+    if (room && socket.id === room.hostId) {
+      playNext(roomId);
+    }
+  });
+
   socket.on('disconnecting', () => {
     for (const roomId of socket.rooms) {
       const room = rooms[roomId];
       if (room && room.hostId === socket.id) {
-        if (room.timeoutId) {
-          clearTimeout(room.timeoutId);
-        }
         delete rooms[roomId];
         io.to(roomId).emit('broadcaster-disconnected');
       }
