@@ -59,8 +59,12 @@ btnHost.addEventListener('click', async () => {
     // Chrome supports "self-capture" (a tab sharing itself), so when the
     // picker appears, pick "This Tab" and check "Also share tab audio".
     hostCaptureStream = await navigator.mediaDevices.getDisplayMedia({
-      video: true,
-      audio: true
+      video: {
+        displaySurface: "browser", // Encourages the browser to default to the "Tab" selection list
+      },
+      audio: true,
+      preferCurrentTab: true,      // Tells the browser to prioritize highlighting this specific tab
+      selfBrowserSurface: "include" // Explicitly ensures the current tab is visible in the list
     });
 
     if (hostCaptureStream.getAudioTracks().length === 0) {
