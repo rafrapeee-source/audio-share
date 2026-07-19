@@ -20,11 +20,12 @@ app.get('/healthz', (req, res) => {
 });
 
 // Server-side state for rooms.
-// NOTE: Audio no longer flows through this server at all — the host captures
-// tab audio locally and streams it directly to each listener over WebRTC.
-// This server's job is now just (a) queue/room bookkeeping and (b) relaying
-// WebRTC signaling messages (offer/answer/ICE) between the host and each
-// listener so they can establish those direct peer connections.
+// NOTE: Audio no longer flows through this server at all — the host
+// self-captures this same tab's audio (Chrome supports a tab sharing
+// itself via getDisplayMedia) and streams it directly to each listener over
+// WebRTC. This server's job is now just (a) queue/room bookkeeping and
+// (b) relaying WebRTC signaling messages (offer/answer/ICE) between the
+// host and each listener so they can establish those direct peer connections.
 const rooms = {};
 
 // Parses YouTube's "duration" string (e.g. "3:45", "1:02:33") into seconds.
@@ -142,17 +143,9 @@ app.get('/api/search', async (req, res) => {
 // Socket Connections
 io.on('connection', (socket) => {
 
-  // "Host" here is really two separate sockets/tabs now:
-  //   - controlId: the tab the person clicks around in (search, queue, room code)
-  //   - playerId:  the second tab (player.html) that actually captures itself
-  //                via getDisplayMedia and broadcasts audio over WebRTC
-  // Splitting them is required because Chrome's tab-capture picker will
-  // never list the tab that's calling getDisplayMedia — a tab can't share
-  // itself, so the thing being captured has to live in its own tab.
   socket.on('create-room', (roomId) => {
     rooms[roomId] = {
-      controlId: socket.id,
-      playerId: null,
+      hostId: socket.id,
       queue: [],
       currentTrack: null,
       isPlaying: false,
@@ -161,35 +154,17 @@ io.on('connection', (socket) => {
     socket.join(roomId);
   });
 
-  // The player tab (opened right after create-room) announces itself here
-  // once it's loaded and ready, so the server knows which socket is the
-  // actual WebRTC broadcast source for the room.
-  socket.on('register-player', (roomId) => {
-    const room = rooms[roomId];
-    if (room) {
-      room.playerId = socket.id;
-      socket.join(roomId);
-      // Any listeners who joined before the player tab was ready need to be
-      // (re)announced now that there's finally a socket to broadcast to them.
-      room.listenerIds.forEach(listenerId => {
-        io.to(room.playerId).emit('listener-joined', listenerId);
-      });
-    }
-  });
-
   socket.on('join-room', (roomId) => {
     const room = rooms[roomId];
     if (room) {
       socket.join(roomId);
 
-      // Only real listeners (not the control tab, not the player tab) count here.
-      if (socket.id !== room.controlId && socket.id !== room.playerId) {
+      // Re-joining host (e.g. after reconnect) shouldn't be treated as a listener.
+      if (socket.id !== room.hostId) {
         room.listenerIds.add(socket.id);
-        // Tell the player tab a new listener showed up so it can create a
-        // fresh RTCPeerConnection for them and kick off signaling.
-        if (room.playerId) {
-          io.to(room.playerId).emit('listener-joined', socket.id);
-        }
+        // Tell the host a new listener showed up so it can create a fresh
+        // RTCPeerConnection for them and kick off signaling (send an offer).
+        io.to(room.hostId).emit('listener-joined', socket.id);
       }
 
       sendSyncState(socket, room);
@@ -260,19 +235,14 @@ io.on('connection', (socket) => {
       const room = rooms[roomId];
       if (!room) continue;
 
-      if (room.controlId === socket.id || room.playerId === socket.id) {
-        // Either tab closing kills the room — control without a player can't
-        // queue anything useful, and a player without control has no UI to
-        // drive it. Simplest correct behavior: the room needs both alive.
+      if (room.hostId === socket.id) {
         if (room.advanceTimer) clearTimeout(room.advanceTimer);
         delete rooms[roomId];
         io.to(roomId).emit('broadcaster-disconnected');
       } else if (room.listenerIds.has(socket.id)) {
         room.listenerIds.delete(socket.id);
-        // Let the player tab know so it can tear down that listener's RTCPeerConnection.
-        if (room.playerId) {
-          io.to(room.playerId).emit('listener-left', socket.id);
-        }
+        // Let the host know so it can tear down that listener's RTCPeerConnection.
+        io.to(room.hostId).emit('listener-left', socket.id);
       }
     }
   });

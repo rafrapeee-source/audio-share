@@ -15,18 +15,13 @@ const searchResults = document.getElementById('search-results');
 const nowPlayingInfo = document.getElementById('now-playing-info');
 const queueListElement = document.getElementById('queue-list');
 const volumeSlider = document.getElementById('volume-slider');
+const ytPlayerIframe = document.getElementById('yt-player');
 const listenerAudio = document.getElementById('listener-audio');
 
 let currentRoomId = null;
 let role = null; // 'host' or 'listener'
 let currentVolume = volumeSlider.value;
 let currentTrack = null;
-
-// This is the CONTROL tab: search, queue, room code. It never captures or
-// streams any audio itself. Hosting opens a second tab (player.html) which
-// is the thing that actually gets shared via getDisplayMedia — a browser
-// tab can't share/capture itself, so the player has to live somewhere else.
-let playerWindow = null;
 
 // Standard public STUN server so peers behind NAT can find each other.
 // No TURN server configured — if a listener is on a very restrictive
@@ -37,8 +32,13 @@ const RTC_CONFIG = {
   iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
 };
 
+// --- HOST-ONLY STATE ---
+// The MediaStream captured from this same tab (self-capture) via getDisplayMedia.
+let hostCaptureStream = null;
+// One RTCPeerConnection per listener, keyed by that listener's socket.id.
+const hostPeerConnections = {};
+
 // --- LISTENER-ONLY STATE ---
-// The single connection back to the player tab (wherever it lives).
 let listenerPeerConnection = null;
 
 // UI View Transition
@@ -52,18 +52,45 @@ function showJukeboxView(roomId, userRole) {
 }
 
 // --- HOST ACTION ---
-btnHost.addEventListener('click', () => {
+btnHost.addEventListener('click', async () => {
+  try {
+    // video: true is required by getDisplayMedia even though we only want
+    // the audio track — Chrome will not grant tab-audio-only capture.
+    // Chrome supports "self-capture" (a tab sharing itself), so when the
+    // picker appears, pick "This Tab" and check "Also share tab audio".
+    hostCaptureStream = await navigator.mediaDevices.getDisplayMedia({
+      video: true,
+      audio: true
+    });
+
+    if (hostCaptureStream.getAudioTracks().length === 0) {
+      alert('No audio track was shared. Make sure to check "Also share tab audio" in the dialog, and pick "This Tab" (not a window or screen).');
+      hostCaptureStream.getTracks().forEach(t => t.stop());
+      hostCaptureStream = null;
+      return;
+    }
+
+    // We don't need the video track for anything — drop it immediately so
+    // we're not holding a capture of the tab's visuals in memory for no reason.
+    hostCaptureStream.getVideoTracks().forEach(t => t.stop());
+
+    // If the user manually stops sharing from Chrome's own "Stop sharing"
+    // toolbar/bar, treat that the same as clicking "Leave Room".
+    hostCaptureStream.getAudioTracks()[0].addEventListener('ended', () => {
+      if (role === 'host') {
+        alert('Tab audio sharing stopped. Closing the room.');
+        leaveRoom();
+      }
+    });
+  } catch (err) {
+    console.error('getDisplayMedia failed or was cancelled:', err);
+    alert('Tab audio sharing was cancelled or blocked, so a room can\'t be hosted without it.');
+    return;
+  }
+
   const roomId = Math.random().toString(36).substring(2, 8).toUpperCase();
   socket.emit('create-room', roomId);
   showJukeboxView(roomId, 'host');
-
-  // Open the player tab. It connects to the server itself, registers as
-  // this room's player, and prompts for tab-audio sharing on its own.
-  playerWindow = window.open(`/player.html?room=${roomId}`, '_blank');
-
-  if (!playerWindow) {
-    alert('Your browser blocked the player tab from opening. Please allow popups for this site and try again.');
-  }
 });
 
 // --- LISTENER ACTION ---
@@ -121,14 +148,64 @@ function displaySearchResults(results) {
 }
 
 // --- VOLUME ---
-// Host: this tab has no audio of its own (the player tab does) — the slider
-// is just informational for now unless we later wire a "set player volume"
-// message to the player tab. Listener: controls their own local <audio>
-// element only — purely local playback volume, doesn't affect anyone else.
+// Host: controls the hidden YouTube iframe (which is what everyone,
+// including the host, actually hears via the self-captured tab audio).
+// Listener: controls their own local <audio> element only — this does NOT
+// affect what other listeners or the host hear, it's purely local playback volume.
 volumeSlider.addEventListener('input', (e) => {
   currentVolume = e.target.value;
-  if (role === 'listener') {
+  if (role === 'host') {
+    sendPlayerCommand('setVolume', [currentVolume]);
+  } else if (role === 'listener') {
     listenerAudio.volume = currentVolume / 100;
+  }
+});
+
+function sendPlayerCommand(func, args = []) {
+  if (ytPlayerIframe && ytPlayerIframe.contentWindow) {
+    ytPlayerIframe.contentWindow.postMessage(JSON.stringify({
+      event: 'command',
+      func: func,
+      args: args
+    }), 'https://www.youtube-nocookie.com');
+  }
+}
+
+function sendPlayerHandshake(event) {
+  if (ytPlayerIframe && ytPlayerIframe.contentWindow) {
+    ytPlayerIframe.contentWindow.postMessage(JSON.stringify({
+      event: event
+    }), 'https://www.youtube-nocookie.com');
+  }
+}
+
+// --- DETECT WHEN SONG ENDS (host only — only the host runs the iframe) ---
+
+window.addEventListener('message', (event) => {
+  if (role !== 'host') return;
+  if (event.origin === 'https://www.youtube-nocookie.com') {
+    try {
+      let data;
+      if (typeof event.data === 'string') {
+        data = JSON.parse(event.data);
+      } else {
+        data = event.data;
+      }
+
+      let isEnded = false;
+      if (data && data.event === 'infoDelivery' && data.info && data.info.playerState === 0) {
+        isEnded = true;
+      } else if (data && data.event === 'onStateChange' && data.info === 0) {
+        isEnded = true;
+      }
+
+      if (isEnded && currentTrack) {
+        console.log("Song finished. Notifying server...");
+        socket.emit('song-ended', currentRoomId, currentTrack.videoId);
+      }
+    } catch (err) {
+      // Ignore
+    }
   }
 });
 
@@ -140,11 +217,24 @@ socket.on('sync-state', (state) => {
   updateQueueUI(state.queue);
 
   if (state.currentTrack && state.isPlaying) {
-    currentTrack = state.currentTrack;
     updateNowPlayingUI(state.currentTrack);
+    currentTrack = state.currentTrack;
+
+    // Only the host actually loads/plays the video. Listeners get their
+    // audio purely from the WebRTC stream — there's no local seek/reload
+    // to do here, the live stream is already wherever the host's playback is.
+    if (role === 'host') {
+      const isNewTrack = !ytPlayerIframe.src || !ytPlayerIframe.src.includes(state.currentTrack.videoId);
+      if (isNewTrack) {
+        playVideo(state.currentTrack);
+      }
+    }
   } else {
     currentTrack = null;
     nowPlayingInfo.innerHTML = '<p class="text-sm text-gray-400 italic">Queue is empty. Search and add a track to start.</p>';
+    if (role === 'host') {
+      ytPlayerIframe.src = '';
+    }
   }
 });
 
@@ -152,6 +242,9 @@ socket.on('play-track', (data) => {
   currentTrack = data.track;
   updateNowPlayingUI(data.track);
   updateQueueUI(data.queue);
+  if (role === 'host') {
+    playVideo(data.track);
+  }
 });
 
 socket.on('queue-updated', (queue) => {
@@ -161,6 +254,9 @@ socket.on('queue-updated', (queue) => {
 socket.on('stop-track', () => {
   currentTrack = null;
   nowPlayingInfo.innerHTML = '<p class="text-sm text-gray-400 italic">Queue is empty.</p>';
+  if (role === 'host') {
+    ytPlayerIframe.src = '';
+  }
 });
 
 function updateNowPlayingUI(track) {
@@ -173,6 +269,18 @@ function updateNowPlayingUI(track) {
       </div>
     </div>
   `;
+}
+
+function playVideo(track) {
+  const myOrigin = window.location.origin;
+
+  ytPlayerIframe.src = `https://www.youtube-nocookie.com/embed/${track.videoId}?autoplay=1&rel=0&enablejsapi=1&vq=small&origin=${encodeURIComponent(myOrigin)}`;
+
+  ytPlayerIframe.onload = () => {
+    sendPlayerHandshake('listening');
+    sendPlayerCommand('addEventListener', ['onStateChange']);
+    sendPlayerCommand('setVolume', [currentVolume]);
+  };
 }
 
 function updateQueueUI(queue) {
@@ -199,7 +307,7 @@ socket.on('room-not-found', () => {
 });
 
 socket.on('broadcaster-disconnected', () => {
-  alert(role === 'host' ? "The player tab closed, ending the room." : "The host disconnected, closing room.");
+  alert("The host disconnected, closing room.");
   leaveRoom();
 });
 
@@ -211,18 +319,76 @@ socket.on('connect', () => {
 });
 
 // =====================================================================
-// WebRTC — LISTENER SIDE ONLY.
-// The control tab never captures or broadcasts audio; that all happens in
-// player.html. This tab, when acting as a listener, just receives the
-// incoming audio stream from whichever socket is the room's player.
+// WebRTC: host self-captures this tab's audio and streams it to every listener.
 // =====================================================================
 
-// The player tab sent us an offer — answer it and start receiving audio.
+// --- HOST SIDE ---
+
+// A new listener joined the room — set up a dedicated RTCPeerConnection
+// for them, add our captured audio track to it, and send them an offer.
+socket.on('listener-joined', async (listenerId) => {
+  if (role !== 'host' || !hostCaptureStream) return;
+
+  const pc = new RTCPeerConnection(RTC_CONFIG);
+  hostPeerConnections[listenerId] = pc;
+
+  hostCaptureStream.getAudioTracks().forEach(track => {
+    pc.addTrack(track, hostCaptureStream);
+  });
+
+  pc.onicecandidate = (event) => {
+    if (event.candidate) {
+      socket.emit('webrtc-ice-candidate', { targetId: listenerId, candidate: event.candidate });
+    }
+  };
+
+  pc.onconnectionstatechange = () => {
+    if (['failed', 'closed', 'disconnected'].includes(pc.connectionState)) {
+      cleanupHostPeerConnection(listenerId);
+    }
+  };
+
+  try {
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    socket.emit('webrtc-offer', { targetId: listenerId, offer });
+  } catch (err) {
+    console.error(`Failed to create offer for listener ${listenerId}:`, err);
+    cleanupHostPeerConnection(listenerId);
+  }
+});
+
+socket.on('webrtc-answer', async ({ fromId, answer }) => {
+  if (role !== 'host') return;
+  const pc = hostPeerConnections[fromId];
+  if (!pc) return;
+  try {
+    await pc.setRemoteDescription(new RTCSessionDescription(answer));
+  } catch (err) {
+    console.error(`Failed to set remote description from listener ${fromId}:`, err);
+  }
+});
+
+socket.on('listener-left', (listenerId) => {
+  cleanupHostPeerConnection(listenerId);
+});
+
+function cleanupHostPeerConnection(listenerId) {
+  const pc = hostPeerConnections[listenerId];
+  if (pc) {
+    pc.close();
+    delete hostPeerConnections[listenerId];
+  }
+}
+
+// --- LISTENER SIDE ---
+
+// The host sent us an offer — answer it and start receiving audio.
 socket.on('webrtc-offer', async ({ fromId, offer }) => {
   if (role !== 'listener') return;
 
-  // If we somehow already had a connection (e.g. player tab reconnected
-  // and re-offered), tear down the old one first.
+  // If we somehow already had a connection (e.g. host reconnected and
+  // re-offered), tear down the old one first.
   if (listenerPeerConnection) {
     listenerPeerConnection.close();
   }
@@ -252,14 +418,18 @@ socket.on('webrtc-offer', async ({ fromId, offer }) => {
     await pc.setLocalDescription(answer);
     socket.emit('webrtc-answer', { targetId: fromId, answer });
   } catch (err) {
-    console.error('Failed to answer player offer:', err);
+    console.error('Failed to answer host offer:', err);
   }
 });
 
-socket.on('webrtc-ice-candidate', async ({ candidate }) => {
+// --- SHARED: ICE candidates flow both directions ---
+socket.on('webrtc-ice-candidate', async ({ fromId, candidate }) => {
   try {
-    if (role === 'listener' && listenerPeerConnection) {
-      await listenerPeerConnection.addIceCandidate(new RTCIceCandidate(candidate));
+    if (role === 'host') {
+      const pc = hostPeerConnections[fromId];
+      if (pc) await pc.addIceCandidate(new RTCIceCandidate(candidate));
+    } else if (role === 'listener') {
+      if (listenerPeerConnection) await listenerPeerConnection.addIceCandidate(new RTCIceCandidate(candidate));
     }
   } catch (err) {
     console.error('Failed to add ICE candidate:', err);
@@ -277,16 +447,20 @@ document.addEventListener('click', () => {
 btnLeave.addEventListener('click', leaveRoom);
 
 function leaveRoom() {
-  if (role === 'host' && playerWindow && !playerWindow.closed) {
-    playerWindow.close();
+  if (role === 'host') {
+    ytPlayerIframe.src = '';
+    if (hostCaptureStream) {
+      hostCaptureStream.getTracks().forEach(t => t.stop());
+      hostCaptureStream = null;
+    }
+    Object.keys(hostPeerConnections).forEach(cleanupHostPeerConnection);
+  } else if (role === 'listener') {
+    if (listenerPeerConnection) {
+      listenerPeerConnection.close();
+      listenerPeerConnection = null;
+    }
+    listenerAudio.srcObject = null;
   }
-  playerWindow = null;
-
-  if (listenerPeerConnection) {
-    listenerPeerConnection.close();
-    listenerPeerConnection = null;
-  }
-  listenerAudio.srcObject = null;
 
   setupPanel.classList.remove('hidden');
   jukeboxView.classList.add('hidden');
