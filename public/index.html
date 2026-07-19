@@ -24,7 +24,7 @@
       <div class="p-6 border border-indigo-500/20 bg-indigo-500/5 rounded-lg text-center">
         <h2 class="text-lg font-semibold mb-2">Host a Jukebox</h2>
         <p class="text-sm text-gray-400 mb-4">Start a session and share the Room ID with friends to queue songs together.</p>
-        <p class="text-xs text-indigo-300/70 mb-4">You'll be asked to share a browser tab — pick <span class="font-semibold">this tab</span> and check <span class="font-semibold">"Share tab audio"</span>. That's what everyone else will hear.</p>
+        <p class="text-xs text-indigo-300/70 mb-4">This opens a second tab that plays the music. When it asks, pick <span class="font-semibold">that player tab</span> and check <span class="font-semibold">"Also share tab audio"</span>. Keep both tabs open.</p>
         <button id="btn-host" class="w-full bg-indigo-600 hover:bg-indigo-500 py-2.5 px-4 rounded font-semibold transition">
           Create Jukebox Room
         </button>
@@ -95,17 +95,10 @@
 
   </div>
 
-  <!-- Hidden Container for YouTube No-Cookie Player. Only the HOST loads this —
-       it's what gets captured as tab audio and streamed out over WebRTC.
-       Listeners never load this iframe at all. -->
-  <iframe 
-    id="yt-player" 
-    class="absolute -top-[9999px] -left-[9999px] pointer-events-none opacity-0" 
-    src="" 
-    allow="autoplay">
-  </iframe>
-
-  <!-- Listener-only audio sink: receives the host's tab-audio stream via WebRTC. -->
+  <!-- Listener-only audio sink: receives the player tab's audio stream via WebRTC.
+       (Hosts don't need an iframe or audio element here anymore — the actual
+       YouTube player lives in the separate player.html tab, since a tab can't
+       capture/share itself.) -->
   <audio id="listener-audio" autoplay></audio>
 
   <script src="app.js"></script>

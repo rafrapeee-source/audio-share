@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Jukebox Player — Keep Open</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="/socket.io/socket.io.js"></script>
+</head>
+<body class="bg-gray-900 text-gray-100 min-h-screen flex items-center justify-center p-6">
+
+  <div class="max-w-md w-full text-center space-y-4">
+    <div id="status-icon" class="text-5xl">🎵</div>
+    <h1 class="text-xl font-bold text-indigo-400">Jukebox Player</h1>
+    <p id="status-text" class="text-sm text-gray-400">Waiting for you to share this tab's audio...</p>
+    <div id="now-playing" class="hidden p-4 bg-gray-800 rounded-lg border border-gray-700 text-left">
+      <p class="text-xs text-indigo-400 uppercase tracking-wider font-bold mb-1">Now Playing</p>
+      <p id="now-playing-title" class="text-sm font-semibold text-white truncate"></p>
+    </div>
+    <p class="text-xs text-gray-600 pt-2">
+      This tab captures its own audio and streams it to everyone in the room.
+      Keep it open — closing it ends the session for everyone.
+    </p>
+  </div>
+
+  <!-- Hidden YouTube player. This is the actual audio source that gets captured. -->
+  <iframe
+    id="yt-player"
+    class="absolute -top-[9999px] -left-[9999px] pointer-events-none opacity-0"
+    src=""
+    allow="autoplay">
+  </iframe>
+
+  <script src="player.js"></script>
+</body>
+</html>
