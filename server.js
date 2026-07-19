@@ -19,7 +19,12 @@ app.get('/healthz', (req, res) => {
   res.status(200).send('ok');
 });
 
-// Server-side state for rooms
+// Server-side state for rooms.
+// NOTE: Audio no longer flows through this server at all — the host captures
+// tab audio locally and streams it directly to each listener over WebRTC.
+// This server's job is now just (a) queue/room bookkeeping and (b) relaying
+// WebRTC signaling messages (offer/answer/ICE) between the host and each
+// listener so they can establish those direct peer connections.
 const rooms = {};
 
 // Parses YouTube's "duration" string (e.g. "3:45", "1:02:33") into seconds.
@@ -50,20 +55,16 @@ function playNext(roomId) {
   if (room.queue.length > 0) {
     room.currentTrack = room.queue.shift();
     room.isPlaying = true;
-    room.trackStartTime = Date.now(); // <-- Record the exact start time of the track
 
     io.to(roomId).emit('play-track', {
       track: room.currentTrack,
       queue: room.queue
     });
 
-    // Server-driven auto-advance: this is now the PRIMARY way the queue
-    // advances, not a fallback. Client-reported 'song-ended' (when a tab
-    // is active/foregrounded) can still trigger an earlier advance as a
-    // fast-path, but we can't rely on any browser tab being active/focused
-    // to fire that event — backgrounded tabs routinely fail to report
-    // 'ended' at all, which is exactly what was causing songs to stall
-    // until someone tabbed back in.
+    // Server-driven auto-advance, based on the track's reported duration.
+    // The host is the only one actually playing the video, but the server
+    // still owns queue advancement so a host tab hiccup doesn't desync the
+    // "what's up next" state everyone else sees.
     const durationSeconds = parseDurationToSeconds(room.currentTrack.duration);
     // Small buffer (2s) past the actual duration so a slightly slow-loading
     // client doesn't get cut off before it even reaches the true end.
@@ -80,25 +81,19 @@ function playNext(roomId) {
   } else {
     room.currentTrack = null;
     room.isPlaying = false;
-    room.trackStartTime = null;
     io.to(roomId).emit('stop-track');
   }
 }
 
-// Shared helper: compute current playback position and push full state to one socket.
-// Used both for fresh joins and for on-demand resyncs (e.g. tab woke up from idle).
+// Shared helper: push current room state (track + queue) to one socket.
+// Used both for fresh joins and for the host reconnecting. There's no
+// elapsedSeconds/playback-position math anymore — the audio itself is a
+// live WebRTC stream, so there's nothing to reseek or drift-correct.
 function sendSyncState(socket, room) {
-  let elapsedSeconds = 0;
-  if (room.trackStartTime) {
-    elapsedSeconds = Math.floor((Date.now() - room.trackStartTime) / 1000);
-  }
-
   socket.emit('sync-state', {
     currentTrack: room.currentTrack,
     queue: room.queue,
-    isPlaying: room.isPlaying,
-    elapsedSeconds: elapsedSeconds,
-    serverTime: Date.now() // lets the client measure its own clock offset if needed
+    isPlaying: room.isPlaying
   });
 }
 
@@ -146,13 +141,14 @@ app.get('/api/search', async (req, res) => {
 
 // Socket Connections
 io.on('connection', (socket) => {
-  
+
   socket.on('create-room', (roomId) => {
     rooms[roomId] = {
       hostId: socket.id,
       queue: [],
       currentTrack: null,
-      isPlaying: false
+      isPlaying: false,
+      listenerIds: new Set()
     };
     socket.join(roomId);
   });
@@ -161,15 +157,25 @@ io.on('connection', (socket) => {
     const room = rooms[roomId];
     if (room) {
       socket.join(roomId);
+
+      // Re-joining host (e.g. after reconnect) shouldn't be treated as a listener.
+      if (socket.id !== room.hostId) {
+        room.listenerIds.add(socket.id);
+        // Tell the host a new listener showed up so it can create a fresh
+        // RTCPeerConnection for them and kick off signaling (send an offer).
+        io.to(room.hostId).emit('listener-joined', socket.id);
+      }
+
       sendSyncState(socket, room);
     } else {
       socket.emit('room-not-found');
     }
   });
 
-  // Any client (not just fresh joiners) can ask for a resync at any time.
-  // This is what lets a tab that went idle/backgrounded catch back up
-  // instead of only ever getting synced once at join time.
+  // A listener whose page reloaded/reconnected but is still "in" the room
+  // (host didn't see a clean disconnect yet) can ask for state without
+  // re-triggering listener-joined bookkeeping weirdness — join-room already
+  // handles this idempotently via the Set, so this is just a plain refetch.
   socket.on('request-sync', (roomId) => {
     const room = rooms[roomId];
     if (room) {
@@ -197,10 +203,6 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('queue-full-error', (message) => {
-    alert(message);
-  });
-
   socket.on('song-ended', (roomId, endedVideoId) => {
     const room = rooms[roomId];
     if (room && room.currentTrack && room.currentTrack.videoId === endedVideoId) {
@@ -209,13 +211,37 @@ io.on('connection', (socket) => {
     }
   });
 
+  // --- WebRTC signaling relay ---
+  // The server never inspects/touches SDP or ICE payloads, it just forwards
+  // them to the intended socket by id. `targetId` is the other side's
+  // socket.id — the host learns listener ids from 'listener-joined', and a
+  // listener learns the host's id from the 'sync-state'/'play-track' flow
+  // (the client stores it after resolving the room's host once).
+  socket.on('webrtc-offer', ({ targetId, offer }) => {
+    io.to(targetId).emit('webrtc-offer', { fromId: socket.id, offer });
+  });
+
+  socket.on('webrtc-answer', ({ targetId, answer }) => {
+    io.to(targetId).emit('webrtc-answer', { fromId: socket.id, answer });
+  });
+
+  socket.on('webrtc-ice-candidate', ({ targetId, candidate }) => {
+    io.to(targetId).emit('webrtc-ice-candidate', { fromId: socket.id, candidate });
+  });
+
   socket.on('disconnecting', () => {
     for (const roomId of socket.rooms) {
       const room = rooms[roomId];
-      if (room && room.hostId === socket.id) {
+      if (!room) continue;
+
+      if (room.hostId === socket.id) {
         if (room.advanceTimer) clearTimeout(room.advanceTimer);
         delete rooms[roomId];
         io.to(roomId).emit('broadcaster-disconnected');
+      } else if (room.listenerIds.has(socket.id)) {
+        room.listenerIds.delete(socket.id);
+        // Let the host know so it can tear down that listener's RTCPeerConnection.
+        io.to(room.hostId).emit('listener-left', socket.id);
       }
     }
   });

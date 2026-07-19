@@ -16,23 +16,32 @@ const nowPlayingInfo = document.getElementById('now-playing-info');
 const queueListElement = document.getElementById('queue-list');
 const volumeSlider = document.getElementById('volume-slider');
 const ytPlayerIframe = document.getElementById('yt-player');
+const listenerAudio = document.getElementById('listener-audio');
 
 let currentRoomId = null;
 let role = null; // 'host' or 'listener'
 let currentVolume = volumeSlider.value;
-let lastTrackStartTime = 0; 
 let currentTrack = null;
-let driftCheckInterval = null;
-let keepAliveInterval = null;
-let playerTimePollInterval = null;
 
-// Real playback position as reported by the YouTube iframe itself (via
-// getCurrentTime), not our own timer guess. Updated whenever the iframe
-// answers a getCurrentTime request. `playerTimeUpdatedAt` is the local
-// Date.now() when that reading arrived, so we can extrapolate a couple
-// seconds forward if a fresh reading hasn't come in yet.
-let lastKnownPlayerTime = null;
-let playerTimeUpdatedAt = 0;
+// Standard public STUN server so peers behind NAT can find each other.
+// No TURN server configured — if a listener is on a very restrictive
+// network (symmetric NAT / locked-down corporate wifi) the direct
+// connection may fail to establish. Good enough for friends-on-home-wifi
+// use, but worth knowing if someone reports "audio just never starts".
+const RTC_CONFIG = {
+  iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+};
+
+// --- HOST-ONLY STATE ---
+// The MediaStream captured from the shared browser tab (system/tab audio).
+let hostCaptureStream = null;
+// One RTCPeerConnection per listener, keyed by that listener's socket.id.
+const hostPeerConnections = {};
+
+// --- LISTENER-ONLY STATE ---
+// The single connection back to the host.
+let listenerPeerConnection = null;
+let hostSocketId = null;
 
 // UI View Transition
 function showJukeboxView(roomId, userRole) {
@@ -45,7 +54,43 @@ function showJukeboxView(roomId, userRole) {
 }
 
 // --- HOST ACTION ---
-btnHost.addEventListener('click', () => {
+btnHost.addEventListener('click', async () => {
+  try {
+    // video: true is required by getDisplayMedia even though we only want
+    // the audio track — Chrome will not grant tab-audio-only capture.
+    // The user needs to pick the "Chrome Tab" option in the share dialog
+    // and check "Share tab audio" (not the whole-screen/window options,
+    // which don't offer that checkbox in most browsers).
+    hostCaptureStream = await navigator.mediaDevices.getDisplayMedia({
+      video: true,
+      audio: true
+    });
+
+    if (hostCaptureStream.getAudioTracks().length === 0) {
+      alert('No audio track was shared. Make sure to check "Share tab audio" in the dialog, and pick a Chrome Tab (not a window or screen).');
+      hostCaptureStream.getTracks().forEach(t => t.stop());
+      hostCaptureStream = null;
+      return;
+    }
+
+    // We don't need the video track for anything — drop it immediately so
+    // we're not holding a capture of the tab's visuals in memory for no reason.
+    hostCaptureStream.getVideoTracks().forEach(t => t.stop());
+
+    // If the user manually stops sharing from Chrome's own "Stop sharing"
+    // toolbar/bar, treat that the same as clicking "Leave Room".
+    hostCaptureStream.getAudioTracks()[0].addEventListener('ended', () => {
+      if (role === 'host') {
+        alert('Tab audio sharing stopped. Closing the room.');
+        leaveRoom();
+      }
+    });
+  } catch (err) {
+    console.error('getDisplayMedia failed or was cancelled:', err);
+    alert('Tab audio sharing was cancelled or blocked, so a room can\'t be hosted without it.');
+    return;
+  }
+
   const roomId = Math.random().toString(36).substring(2, 8).toUpperCase();
   socket.emit('create-room', roomId);
   showJukeboxView(roomId, 'host');
@@ -105,10 +150,18 @@ function displaySearchResults(results) {
   });
 }
 
-// --- VOLUME & COMMANDS ---
+// --- VOLUME ---
+// Host: controls the hidden YouTube iframe (which is what everyone,
+// including the host, actually hears via the tab-audio capture).
+// Listener: controls their own local <audio> element only — this does NOT
+// affect what other listeners or the host hear, it's purely local playback volume.
 volumeSlider.addEventListener('input', (e) => {
   currentVolume = e.target.value;
-  sendPlayerCommand('setVolume', [currentVolume]);
+  if (role === 'host') {
+    sendPlayerCommand('setVolume', [currentVolume]);
+  } else if (role === 'listener') {
+    listenerAudio.volume = currentVolume / 100;
+  }
 });
 
 function sendPlayerCommand(func, args = []) {
@@ -121,7 +174,6 @@ function sendPlayerCommand(func, args = []) {
   }
 }
 
-// Send raw handshake event initialization directly to the window context
 function sendPlayerHandshake(event) {
   if (ytPlayerIframe && ytPlayerIframe.contentWindow) {
     ytPlayerIframe.contentWindow.postMessage(JSON.stringify({
@@ -130,16 +182,10 @@ function sendPlayerHandshake(event) {
   }
 }
 
-// Ask the YouTube iframe for its actual current playback position. The
-// answer comes back asynchronously as an 'infoDelivery' message and is
-// captured in the window 'message' listener below (info.currentTime).
-function requestPlayerTime() {
-  sendPlayerCommand('getCurrentTime');
-}
-
-// --- DETECT WHEN SONG ENDS ---
+// --- DETECT WHEN SONG ENDS (host only — only the host runs the iframe) ---
 
 window.addEventListener('message', (event) => {
+  if (role !== 'host') return;
   if (event.origin === 'https://www.youtube-nocookie.com') {
     try {
       let data;
@@ -149,32 +195,16 @@ window.addEventListener('message', (event) => {
         data = event.data;
       }
 
-      // Capture the real playback position whenever the iframe reports one.
-      // This is what lets drift-checking compare against actual video
-      // position instead of just our own wall-clock estimate.
-      if (data && data.event === 'infoDelivery' && data.info && typeof data.info.currentTime === 'number') {
-        lastKnownPlayerTime = data.info.currentTime;
-        playerTimeUpdatedAt = Date.now();
-      }
-
       let isEnded = false;
-
-      // Check standard and raw message formats
       if (data && data.event === 'infoDelivery' && data.info && data.info.playerState === 0) {
         isEnded = true;
       } else if (data && data.event === 'onStateChange' && data.info === 0) {
         isEnded = true;
       }
 
-      if (isEnded) {
-        const now = Date.now();
-        // Cooldown: Only allow ended triggers if the song has been playing for at least 5 seconds
-        if (now - lastTrackStartTime > 5000 && currentTrack) {
-          lastTrackStartTime = now;
-          console.log("Song finished. Notifying server...");
-          // Pass the specific videoId that ended to prevent double-skips on the server
-          socket.emit('song-ended', currentRoomId, currentTrack.videoId);
-        }
+      if (isEnded && currentTrack) {
+        console.log("Song finished. Notifying server...");
+        socket.emit('song-ended', currentRoomId, currentTrack.videoId);
       }
     } catch (err) {
       // Ignore
@@ -185,44 +215,39 @@ window.addEventListener('message', (event) => {
 // --- SHARED REAL-TIME EVENTS ---
 
 socket.on('sync-state', (state) => {
-  // Safe fallback to grab the active Room ID
   const activeRoomId = currentRoomId || inputRoomId.value.toUpperCase();
-  // showJukeboxView is safe to call again on a resync — it just re-asserts
-  // the current view, it doesn't reset anything.
   showJukeboxView(activeRoomId, role === 'host' ? 'host' : 'listener');
   updateQueueUI(state.queue);
 
   if (state.currentTrack && state.isPlaying) {
-    const isNewTrack = !currentTrack || currentTrack.videoId !== state.currentTrack.videoId;
+    updateNowPlayingUI(state.currentTrack);
+    currentTrack = state.currentTrack;
 
-    if (isNewTrack) {
-      // Different (or first) track — load it fresh at the server's position.
-      playVideo(state.currentTrack, state.elapsedSeconds);
-    } else {
-      // Same track already playing locally. Only reseek if we've drifted
-      // noticeably; otherwise reloading the iframe every resync would cause
-      // audible stutter for no benefit.
-      const expectedElapsed = state.elapsedSeconds;
-      const localElapsed = getLocalPlaybackPosition();
-      const driftSeconds = Math.abs(expectedElapsed - localElapsed);
-
-      if (driftSeconds > 3) {
-        console.log(`Drift detected (${driftSeconds}s, using ${lastKnownPlayerTime !== null ? 'real player time' : 'wall-clock estimate'}). Reseeking...`);
-        playVideo(state.currentTrack, expectedElapsed);
-      } else {
-        // Still in sync — just make sure the drift-check loop keeps running.
-        startDriftChecking();
+    // Only the host actually loads/plays the video. Listeners get their
+    // audio purely from the WebRTC stream — there's no local seek/reload
+    // to do here, the live stream is already wherever the host's playback is.
+    if (role === 'host') {
+      const isNewTrack = !ytPlayerIframe.src || !ytPlayerIframe.src.includes(state.currentTrack.videoId);
+      if (isNewTrack) {
+        playVideo(state.currentTrack);
       }
     }
   } else {
-    stopDriftChecking();
-    stopKeepAlive();
+    currentTrack = null;
+    nowPlayingInfo.innerHTML = '<p class="text-sm text-gray-400 italic">Queue is empty. Search and add a track to start.</p>';
+    if (role === 'host') {
+      ytPlayerIframe.src = '';
+    }
   }
 });
 
 socket.on('play-track', (data) => {
-  playVideo(data.track);
+  currentTrack = data.track;
+  updateNowPlayingUI(data.track);
   updateQueueUI(data.queue);
+  if (role === 'host') {
+    playVideo(data.track);
+  }
 });
 
 socket.on('queue-updated', (queue) => {
@@ -230,63 +255,35 @@ socket.on('queue-updated', (queue) => {
 });
 
 socket.on('stop-track', () => {
-  ytPlayerIframe.src = '';
   currentTrack = null;
-  stopDriftChecking();
-  stopKeepAlive();
   nowPlayingInfo.innerHTML = '<p class="text-sm text-gray-400 italic">Queue is empty.</p>';
+  if (role === 'host') {
+    ytPlayerIframe.src = '';
+  }
 });
 
-// Best estimate of "what second is this listener's player actually on".
-// Prefers a real getCurrentTime() reading from the iframe (extrapolated
-// forward by however long it's been since that reading arrived, since
-// readings are only refreshed periodically). Falls back to the pure
-// wall-clock guess if we don't have a real reading yet (e.g. right after
-// a fresh load, before the iframe has answered its first getCurrentTime).
-function getLocalPlaybackPosition() {
-  if (lastKnownPlayerTime !== null) {
-    const secondsSinceReading = (Date.now() - playerTimeUpdatedAt) / 1000;
-    return lastKnownPlayerTime + secondsSinceReading;
-  }
-  return (Date.now() - lastTrackStartTime) / 1000;
+function updateNowPlayingUI(track) {
+  nowPlayingInfo.innerHTML = `
+    <div class="flex items-center gap-3">
+      <img src="${track.thumbnail}" class="w-16 h-12 object-cover rounded border border-gray-700">
+      <div class="flex-1 min-w-0">
+        <p class="text-sm font-bold text-white truncate">${track.title}</p>
+        <p class="text-xs text-indigo-400">${role === 'host' ? 'Now streaming' : 'Now playing'}</p>
+      </div>
+    </div>
+  `;
 }
 
-function playVideo(track, startSecond = 0) {
+function playVideo(track) {
   const myOrigin = window.location.origin;
-  
-  // Store the active track locally
-  currentTrack = track;
-  
-  // Adjust the cooldown lock based on how far into the song we are starting
-  lastTrackStartTime = Date.now() - (startSecond * 1000);
 
-  // Reset real-player-time tracking — any reading we had was for whatever
-  // was playing before, and would otherwise pollute the next drift check
-  // until a fresh getCurrentTime response comes back in.
-  lastKnownPlayerTime = null;
-  playerTimeUpdatedAt = 0;
-
-  // We append &start=... to make the YouTube player jump directly to the synchronized second
-  ytPlayerIframe.src = `https://www.youtube-nocookie.com/embed/${track.videoId}?autoplay=1&rel=0&enablejsapi=1&vq=small&start=${startSecond}&origin=${encodeURIComponent(myOrigin)}`;
+  ytPlayerIframe.src = `https://www.youtube-nocookie.com/embed/${track.videoId}?autoplay=1&rel=0&enablejsapi=1&vq=small&origin=${encodeURIComponent(myOrigin)}`;
 
   ytPlayerIframe.onload = () => {
     sendPlayerHandshake('listening');
     sendPlayerCommand('addEventListener', ['onStateChange']);
     sendPlayerCommand('setVolume', [currentVolume]);
   };
-
-  nowPlayingInfo.innerHTML = `
-    <div class="flex items-center gap-3">
-      <img src="${track.thumbnail}" class="w-16 h-12 object-cover rounded border border-gray-700">
-      <div class="flex-1 min-w-0">
-        <p class="text-sm font-bold text-white truncate">${track.title}</p>
-        <p class="text-xs text-indigo-400">Now streaming</p>
-      </div>
-    </div>
-  `;
-
-  startDriftChecking();
-  startKeepAlive();
 }
 
 function updateQueueUI(queue) {
@@ -317,124 +314,160 @@ socket.on('broadcaster-disconnected', () => {
   leaveRoom();
 });
 
-// Ask the server for the current authoritative state and reseek the player to match.
-// Called on: initial connect, socket reconnect, and tab becoming visible again.
-function requestFreshSync() {
-  if (currentRoomId) {
-    console.log("Requesting fresh sync from server...");
-    // Also ask the iframe for its real position right now, so by the time
-    // sync-state comes back we're comparing against as fresh a reading as
-    // possible rather than one that might be several seconds stale.
-    requestPlayerTime();
-    socket.emit('request-sync', currentRoomId);
-  }
-}
-
 socket.on('connect', () => {
   if (currentRoomId) {
     console.log("Reconnected to server. Syncing room state...");
-    // Host still needs join-room to (re)join the socket.io room server-side
-    // after a reconnect; listeners already have a room record, but re-joining
-    // is harmless and guarantees we're subscribed to broadcasts either way.
     socket.emit('join-room', currentRoomId);
   }
 });
 
-// Browser tabs get heavily throttled (or their socket silently dies) while
-// backgrounded. The moment the tab becomes visible again, force a resync
-// instead of trusting whatever state we were left in.
-document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible' && currentRoomId) {
-    // If the underlying socket dropped while hidden, socket.io will
-    // reconnect and our 'connect' handler above will also fire a sync.
-    // If it stayed connected the whole time, we still want to correct
-    // for drift accumulated while timers were throttled.
-    if (socket.connected) {
-      requestFreshSync();
+// =====================================================================
+// WebRTC: host captures tab audio and streams it to every listener.
+// =====================================================================
+
+// --- HOST SIDE ---
+
+// A new listener joined the room — set up a dedicated RTCPeerConnection
+// for them, add our captured audio track to it, and send them an offer.
+socket.on('listener-joined', async (listenerId) => {
+  if (role !== 'host' || !hostCaptureStream) return;
+
+  const pc = new RTCPeerConnection(RTC_CONFIG);
+  hostPeerConnections[listenerId] = pc;
+
+  hostCaptureStream.getAudioTracks().forEach(track => {
+    pc.addTrack(track, hostCaptureStream);
+  });
+
+  pc.onicecandidate = (event) => {
+    if (event.candidate) {
+      socket.emit('webrtc-ice-candidate', { targetId: listenerId, candidate: event.candidate });
     }
+  };
+
+  pc.onconnectionstatechange = () => {
+    if (['failed', 'closed', 'disconnected'].includes(pc.connectionState)) {
+      cleanupHostPeerConnection(listenerId);
+    }
+  };
+
+  try {
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    socket.emit('webrtc-offer', { targetId: listenerId, offer });
+  } catch (err) {
+    console.error(`Failed to create offer for listener ${listenerId}:`, err);
+    cleanupHostPeerConnection(listenerId);
   }
 });
 
-// Periodic drift correction: every 15s while something is playing, compare
-// where the player *should* be (per server truth) against where it likely
-// drifted to, and nudge it back in line. This is what keeps everyone
-// glued together over a long session, not just at the moment they join.
-function startDriftChecking() {
-  stopDriftChecking();
-  driftCheckInterval = setInterval(() => {
-    if (document.visibilityState !== 'visible') return; // no point correcting while hidden
-    if (!currentTrack || !ytPlayerIframe.contentWindow) return;
-    requestFreshSync();
-  }, 15000);
-  startPlayerTimePolling();
-}
-
-function stopDriftChecking() {
-  if (driftCheckInterval) {
-    clearInterval(driftCheckInterval);
-    driftCheckInterval = null;
+socket.on('webrtc-answer', async ({ fromId, answer }) => {
+  if (role !== 'host') return;
+  const pc = hostPeerConnections[fromId];
+  if (!pc) return;
+  try {
+    await pc.setRemoteDescription(new RTCSessionDescription(answer));
+  } catch (err) {
+    console.error(`Failed to set remote description from listener ${fromId}:`, err);
   }
-  stopPlayerTimePolling();
-}
+});
 
-// Keeps lastKnownPlayerTime fresh (every 3s) so that whenever a drift check
-// or resync happens, we're comparing against real player position instead
-// of a stale or purely theoretical wall-clock guess. This is the piece that
-// actually catches "buffered late so it's really behind" or "genuinely
-// running ahead" cases that timestamp math alone can't see.
-function startPlayerTimePolling() {
-  stopPlayerTimePolling();
-  playerTimePollInterval = setInterval(() => {
-    if (document.visibilityState !== 'visible') return;
-    if (!currentTrack || !ytPlayerIframe.contentWindow) return;
-    requestPlayerTime();
-  }, 3000);
-}
+socket.on('listener-left', (listenerId) => {
+  cleanupHostPeerConnection(listenerId);
+});
 
-function stopPlayerTimePolling() {
-  if (playerTimePollInterval) {
-    clearInterval(playerTimePollInterval);
-    playerTimePollInterval = null;
+function cleanupHostPeerConnection(listenerId) {
+  const pc = hostPeerConnections[listenerId];
+  if (pc) {
+    pc.close();
+    delete hostPeerConnections[listenerId];
   }
 }
 
-// Keep-alive: while a track is actively playing, ping a plain HTTP endpoint
-// every few minutes so Render's free-tier instance doesn't spin down mid-song.
-// This intentionally does NOT run when nothing is playing — an idle room
-// with no music should be allowed to sleep normally.
-//
-// Reliability note: background tabs get their JS timers throttled, but
-// Chrome/Firefox exempt tabs that are (a) playing audible audio and/or
-// (b) holding an open WebSocket — this app has both, so this interval
-// should keep firing even while backgrounded. If a listener mutes the
-// player entirely, the audio exemption may not apply, but the open
-// socket.io WebSocket connection alone is generally enough to avoid the
-// most aggressive throttling tiers.
-const KEEP_ALIVE_INTERVAL_MS = 3 * 60 * 1000; // well under Render's 15-min timeout, with margin
+// --- LISTENER SIDE ---
 
-function startKeepAlive() {
-  if (keepAliveInterval) return; // already running
-  keepAliveInterval = setInterval(() => {
-    fetch('/healthz').catch(() => {
-      // Ignore failures — if the server is unreachable there's nothing
-      // to keep alive anyway; the next drift-check/reconnect will surface it.
+// The host sent us an offer — answer it and start receiving audio.
+socket.on('webrtc-offer', async ({ fromId, offer }) => {
+  if (role !== 'listener') return;
+
+  hostSocketId = fromId;
+
+  // If we somehow already had a connection (e.g. host reconnected and
+  // re-offered), tear down the old one first.
+  if (listenerPeerConnection) {
+    listenerPeerConnection.close();
+  }
+
+  const pc = new RTCPeerConnection(RTC_CONFIG);
+  listenerPeerConnection = pc;
+
+  pc.ontrack = (event) => {
+    listenerAudio.srcObject = event.streams[0];
+    listenerAudio.volume = currentVolume / 100;
+    listenerAudio.play().catch(err => {
+      // Autoplay of audio-with-sound can be blocked until the user
+      // interacts with the page. Surface this clearly instead of failing silently.
+      console.warn('Autoplay was blocked, waiting for user interaction:', err);
     });
-  }, KEEP_ALIVE_INTERVAL_MS);
-}
+  };
 
-function stopKeepAlive() {
-  if (keepAliveInterval) {
-    clearInterval(keepAliveInterval);
-    keepAliveInterval = null;
+  pc.onicecandidate = (event) => {
+    if (event.candidate) {
+      socket.emit('webrtc-ice-candidate', { targetId: fromId, candidate: event.candidate });
+    }
+  };
+
+  try {
+    await pc.setRemoteDescription(new RTCSessionDescription(offer));
+    const answer = await pc.createAnswer();
+    await pc.setLocalDescription(answer);
+    socket.emit('webrtc-answer', { targetId: fromId, answer });
+  } catch (err) {
+    console.error('Failed to answer host offer:', err);
   }
-}
+});
+
+// --- SHARED: ICE candidates flow both directions ---
+socket.on('webrtc-ice-candidate', async ({ fromId, candidate }) => {
+  try {
+    if (role === 'host') {
+      const pc = hostPeerConnections[fromId];
+      if (pc) await pc.addIceCandidate(new RTCIceCandidate(candidate));
+    } else if (role === 'listener') {
+      if (listenerPeerConnection) await listenerPeerConnection.addIceCandidate(new RTCIceCandidate(candidate));
+    }
+  } catch (err) {
+    console.error('Failed to add ICE candidate:', err);
+  }
+});
+
+// A tab that autoplay-blocked the <audio> element will unblock as soon as
+// the user interacts with the page at all — nudge playback on first click.
+document.addEventListener('click', () => {
+  if (role === 'listener' && listenerAudio.srcObject && listenerAudio.paused) {
+    listenerAudio.play().catch(() => {});
+  }
+}, { once: false });
 
 btnLeave.addEventListener('click', leaveRoom);
 
 function leaveRoom() {
-  ytPlayerIframe.src = '';
-  stopDriftChecking();
-  stopKeepAlive();
+  if (role === 'host') {
+    ytPlayerIframe.src = '';
+    if (hostCaptureStream) {
+      hostCaptureStream.getTracks().forEach(t => t.stop());
+      hostCaptureStream = null;
+    }
+    Object.keys(hostPeerConnections).forEach(cleanupHostPeerConnection);
+  } else if (role === 'listener') {
+    if (listenerPeerConnection) {
+      listenerPeerConnection.close();
+      listenerPeerConnection = null;
+    }
+    listenerAudio.srcObject = null;
+    hostSocketId = null;
+  }
+
   setupPanel.classList.remove('hidden');
   jukeboxView.classList.add('hidden');
   roomBadge.classList.add('hidden');
@@ -444,6 +477,7 @@ function leaveRoom() {
   searchInput.value = '';
   inputRoomId.value = '';
   currentRoomId = null;
+  currentTrack = null;
   role = null;
   socket.emit('leave-room');
 }
