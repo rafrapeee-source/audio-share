@@ -126,9 +126,16 @@
        it's what gets captured as tab audio and streamed out over WebRTC via
        self-capture (Chrome supports a tab sharing itself; pick "This Tab"
        when prompted). Listeners never load this iframe at all. -->
-  <iframe
+  <!-- <iframe
     id="yt-player"
     class="absolute -top-[9999px] -left-[9999px] pointer-events-none opacity-0"
+    src=""
+    allow="autoplay">
+  </iframe> -->
+
+  <iframe
+    id="yt-player"
+    class="fixed bottom-0 right-0 w-[1px] h-[1px] pointer-events-none opacity-[0.01]"
     src=""
     allow="autoplay">
   </iframe>
