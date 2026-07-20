@@ -21,13 +21,20 @@
 
     <!-- Setup Panel -->
     <div id="setup-panel" class="grid md:grid-cols-2 gap-6">
-      <div class="p-6 border border-indigo-500/20 bg-indigo-500/5 rounded-lg text-center">
-        <h2 class="text-lg font-semibold mb-2">Host a Jukebox</h2>
-        <p class="text-sm text-gray-400 mb-4">Start a session and share the Room ID with friends to queue songs together.</p>
-        <p class="text-xs text-indigo-300/70 mb-4">You'll be asked to share a tab — pick <span class="font-semibold">"This Tab"</span> (this same Jukebox Party tab) and check <span class="font-semibold">"Also share tab audio"</span>. That's what everyone else will hear.</p>
-        <button id="btn-host" class="w-full bg-indigo-600 hover:bg-indigo-500 py-2.5 px-4 rounded font-semibold transition">
-          Create Jukebox Room
-        </button>
+      <div class="p-6 border border-indigo-500/20 bg-indigo-500/5 rounded-lg text-center flex flex-col justify-between h-full">
+        <div>
+          <h2 class="text-lg font-semibold mb-2">Host a Jukebox</h2>
+          <p class="text-sm text-gray-400 mb-4">Start a session to search, queue, and play your favorite songs.</p>
+          <p class="text-xs text-indigo-300/70 mb-4">For online, you will be asked to share your tab's audio so your friends can listen along with you.</p>
+        </div>
+        <div class="space-y-2 mt-4">
+          <button id="btn-host" class="w-full bg-indigo-600 hover:bg-indigo-500 py-2.5 px-4 rounded font-semibold transition">
+            Create Online Room
+          </button>
+          <button id="btn-solo" class="w-full bg-gray-700 hover:bg-gray-600 py-2.5 px-4 rounded font-semibold transition">
+            Start Solo Jukebox
+          </button>
+        </div>
       </div>
 
       <div class="p-6 border border-gray-700 bg-gray-700/10 rounded-lg text-center">

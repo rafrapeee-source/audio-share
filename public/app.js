@@ -39,6 +39,9 @@ let elapsedSeconds = 0;
 let totalDurationSeconds = 0;
 let isUserDragging = false; // Guard flag to halt automated timeline snapping while scrubbing
 
+const btnSolo = document.getElementById('btn-solo'); // Selector for new button
+let isSoloMode = false; // Flag to track if the session is Solo or Multiplayer
+
 // Standard public STUN server so peers behind NAT can find each other.
 const RTC_CONFIG = {
   iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
@@ -84,9 +87,13 @@ function showJukeboxView(roomId, userRole) {
   setupPanel.classList.add('hidden');
   jukeboxView.classList.remove('hidden');
   roomBadge.classList.remove('hidden');
-  displayRoomId.textContent = roomId;
 
-  // Render host controls block only if user is hosting
+  if (isSoloMode) {
+    displayRoomId.textContent = "SOLO MODE";
+  } else {
+    displayRoomId.textContent = roomId;
+  }
+
   if (userRole === 'host') {
     hostControls.classList.remove('hidden');
   } else {
@@ -96,6 +103,7 @@ function showJukeboxView(roomId, userRole) {
 
 // --- HOST ACTION ---
 btnHost.addEventListener('click', async () => {
+  isSoloMode = false;
   try {
     // We capture audio with speech-processing filters disabled to prevent music pumping
     hostCaptureStream = await navigator.mediaDevices.getDisplayMedia({
@@ -134,6 +142,16 @@ btnHost.addEventListener('click', async () => {
     return;
   }
 
+  const roomId = Math.random().toString(36).substring(2, 8).toUpperCase();
+  socket.emit('create-room', roomId);
+  showJukeboxView(roomId, 'host');
+});
+
+// --- SOLO ACTION ---
+btnSolo.addEventListener('click', () => {
+  isSoloMode = true;
+
+  // We bypass getDisplayMedia entirely. No audio sharing or tab sharing prompts!
   const roomId = Math.random().toString(36).substring(2, 8).toUpperCase();
   socket.emit('create-room', roomId);
   showJukeboxView(roomId, 'host');
@@ -416,7 +434,7 @@ socket.on('connect', () => {
 // --- HOST SIDE ---
 
 socket.on('listener-joined', async (listenerId) => {
-  if (role !== 'host' || !hostCaptureStream) return;
+  if (role !== 'host' || isSoloMode || !hostCaptureStream) return;
 
   const pc = new RTCPeerConnection(RTC_CONFIG);
   hostPeerConnections[listenerId] = pc;
@@ -609,6 +627,8 @@ function leaveRoom() {
   durationLabel.textContent = "0:00";
   isPaused = false;
   btnPlayPause.textContent = 'Pause';
+
+  isSoloMode = false;
 
   setupPanel.classList.remove('hidden');
   jukeboxView.classList.add('hidden');
