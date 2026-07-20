@@ -12,6 +12,7 @@ const inputRoomId = document.getElementById('input-room-id');
 const searchForm = document.getElementById('search-form');
 const searchInput = document.getElementById('search-input');
 const searchResults = document.getElementById('search-results');
+const btnClearSearch = document.getElementById('btn-clear-search');
 const nowPlayingInfo = document.getElementById('now-playing-info');
 const queueListElement = document.getElementById('queue-list');
 const volumeSlider = document.getElementById('volume-slider');
@@ -165,7 +166,31 @@ btnJoin.addEventListener('click', () => {
   socket.emit('join-room', roomId);
 });
 
-// --- SEARCH FORM ---
+// --- SEARCH HANDLING ---
+
+function clearSearchResults() {
+  searchResults.innerHTML = '<p class="text-sm text-gray-500 italic">No search results yet.</p>';
+}
+
+// Watch input changes to toggle the clear button and clear results dynamically
+searchInput.addEventListener('input', () => {
+  const value = searchInput.value.trim();
+  if (value) {
+    btnClearSearch.classList.remove('hidden');
+  } else {
+    btnClearSearch.classList.add('hidden');
+    clearSearchResults();
+  }
+});
+
+// Clear input field and restore search list back to blank state
+btnClearSearch.addEventListener('click', () => {
+  searchInput.value = '';
+  btnClearSearch.classList.add('hidden');
+  clearSearchResults();
+  searchInput.focus();
+});
+
 searchForm.addEventListener('submit', async (e) => {
   e.preventDefault();
   const query = searchInput.value.trim();
@@ -663,10 +688,11 @@ function leaveRoom() {
   setupPanel.classList.remove('hidden');
   jukeboxView.classList.add('hidden');
   roomBadge.classList.add('hidden');
-  searchResults.innerHTML = '<p class="text-sm text-gray-500 italic">No search results yet.</p>';
+  clearSearchResults();
   nowPlayingInfo.innerHTML = '<p class="text-sm text-gray-400 italic">Queue is empty.</p>';
   queueListElement.innerHTML = '<p class="text-xs text-gray-500 italic">No songs queued.</p>';
   searchInput.value = '';
+  btnClearSearch.classList.add('hidden');
   inputRoomId.value = '';
   
   // Clear application state

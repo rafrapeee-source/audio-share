@@ -57,7 +57,15 @@
         <div>
           <h2 class="text-lg font-semibold text-gray-300 mb-2">Search Music</h2>
           <form id="search-form" class="flex gap-2">
-            <input type="text" id="search-input" placeholder="Search song or artist..." class="flex-1 bg-gray-900 border border-gray-700 rounded px-3 py-2 text-white focus:outline-none focus:border-indigo-500">
+            <!-- Position Relative Wrapper for Search Input with Clear Button -->
+            <div class="relative flex-1">
+              <input type="text" id="search-input" placeholder="Search song or artist..." class="w-full bg-gray-900 border border-gray-700 rounded pl-3 pr-10 py-2 text-white focus:outline-none focus:border-indigo-500">
+              <button type="button" id="btn-clear-search" class="hidden absolute inset-y-0 right-0 pr-3 flex items-center text-gray-400 hover:text-white transition focus:outline-none">
+                <svg class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
             <button type="submit" class="bg-indigo-600 hover:bg-indigo-500 py-2 px-6 rounded font-semibold transition">
               Search
             </button>
@@ -122,23 +130,19 @@
 
   </div>
 
-  <!-- Hidden Container for YouTube No-Cookie Player. Only the HOST loads this —
-       it's what gets captured as tab audio and streamed out over WebRTC via
-       self-capture (Chrome supports a tab sharing itself; pick "This Tab"
-       when prompted). Listeners never load this iframe at all. -->
-  <!-- <iframe
+  <iframe
     id="yt-player"
     class="absolute -top-[9999px] -left-[9999px] pointer-events-none opacity-0"
     src=""
     allow="autoplay">
-  </iframe> -->
+  </iframe>
 
-  <iframe
+  <!-- <iframe
     id="yt-player"
     class="fixed bottom-0 right-0 w-[1px] h-[1px] pointer-events-none opacity-[0.01]"
     src=""
     allow="autoplay">
-  </iframe>
+  </iframe> -->
 
   <!-- Listener-only audio sink: receives the host's tab-audio stream via WebRTC. -->
   <audio id="listener-audio" autoplay></audio>
