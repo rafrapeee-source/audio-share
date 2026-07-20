@@ -33,6 +33,7 @@ let role = null; // 'host' or 'listener'
 let currentVolume = volumeSlider.value;
 let currentTrack = null;
 let isPaused = false;
+let isTransitioning = false; // Prevents double-firing on song end
 
 // Seekbar internal variables
 let elapsedSeconds = 0;
@@ -279,7 +280,29 @@ volumeSlider.addEventListener('input', (e) => {
   }
 });
 
+// function sendPlayerCommand(func, args = []) {
+//   if (ytPlayerIframe && ytPlayerIframe.contentWindow) {
+//     ytPlayerIframe.contentWindow.postMessage(JSON.stringify({
+//       event: 'command',
+//       func: func,
+//       args: args
+//     }), 'https://www.youtube-nocookie.com');
+//   }
+// }
+
+// function sendPlayerHandshake(event) {
+//   if (ytPlayerIframe && ytPlayerIframe.contentWindow) {
+//     ytPlayerIframe.contentWindow.postMessage(JSON.stringify({
+//       event: event
+//     }), 'https://www.youtube-nocookie.com');
+//   }
+// }
+
 function sendPlayerCommand(func, args = []) {
+  // GUARD: Don't send messages if the iframe isn't currently on YouTube
+  const currentSrc = ytPlayerIframe.getAttribute('src');
+  if (!currentSrc || !currentSrc.includes('youtube')) return;
+
   if (ytPlayerIframe && ytPlayerIframe.contentWindow) {
     ytPlayerIframe.contentWindow.postMessage(JSON.stringify({
       event: 'command',
@@ -290,6 +313,10 @@ function sendPlayerCommand(func, args = []) {
 }
 
 function sendPlayerHandshake(event) {
+  // GUARD: Don't send messages if the iframe isn't currently on YouTube
+  const currentSrc = ytPlayerIframe.getAttribute('src');
+  if (!currentSrc || !currentSrc.includes('youtube')) return;
+
   if (ytPlayerIframe && ytPlayerIframe.contentWindow) {
     ytPlayerIframe.contentWindow.postMessage(JSON.stringify({
       event: event
@@ -327,7 +354,13 @@ window.addEventListener('message', (event) => {
         isEnded = true;
       }
 
-      if (isEnded && currentTrack) {
+      // if (isEnded && currentTrack) {
+      //   console.log("Song finished. Notifying server...");
+      //   socket.emit('song-ended', currentRoomId, currentTrack.videoId);
+      // }
+
+      if (isEnded && currentTrack && !isTransitioning) {
+        isTransitioning = true; // Lock it so it doesn't fire again for this song
         console.log("Song finished. Notifying server...");
         socket.emit('song-ended', currentRoomId, currentTrack.videoId);
       }
@@ -377,11 +410,28 @@ socket.on('queue-updated', (queue) => {
   updateQueueUI(queue);
 });
 
+// socket.on('stop-track', () => {
+//   currentTrack = null;
+//   nowPlayingInfo.innerHTML = '<p class="text-sm text-gray-400 italic">Queue is empty.</p>';
+//   if (role === 'host') {
+//     ytPlayerIframe.setAttribute('src', '');;
+//     isPaused = false;
+//     btnPlayPause.textContent = 'Pause';
+    
+//     // Clear out timeline views
+//     seekbar.value = 0;
+//     currentTimeLabel.textContent = "0:00";
+//     durationLabel.textContent = "0:00";
+//   }
+// });
+
 socket.on('stop-track', () => {
   currentTrack = null;
   nowPlayingInfo.innerHTML = '<p class="text-sm text-gray-400 italic">Queue is empty.</p>';
+  
   if (role === 'host') {
-    ytPlayerIframe.setAttribute('src', '');;
+    ytPlayerIframe.onload = null; // <--- ADD THIS to prevent the ghost load
+    ytPlayerIframe.setAttribute('src', '');
     isPaused = false;
     btnPlayPause.textContent = 'Pause';
     
@@ -462,6 +512,7 @@ function updateNowPlayingUI(track) {
 function playVideo(track) {
   // Parse and establish boundaries for our seekbar
   isUserDragging = false;
+  isTransitioning = false;
   elapsedSeconds = 0;
   totalDurationSeconds = parseDuration(track.duration);
 
