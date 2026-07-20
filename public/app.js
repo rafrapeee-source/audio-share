@@ -349,7 +349,8 @@ socket.on('sync-state', (state) => {
     currentTrack = state.currentTrack;
 
     if (role === 'host') {
-      const isNewTrack = !ytPlayerIframe.src || !ytPlayerIframe.src.includes(state.currentTrack.videoId);
+      const currentSrc = ytPlayerIframe.getAttribute('src') || '';
+      const isNewTrack = !currentSrc || !currentSrc.includes(state.currentTrack.videoId);
       if (isNewTrack) {
         playVideo(state.currentTrack);
       }
@@ -358,7 +359,7 @@ socket.on('sync-state', (state) => {
     currentTrack = null;
     nowPlayingInfo.innerHTML = '<p class="text-sm text-gray-400 italic">Queue is empty. Search and add a track to start.</p>';
     if (role === 'host') {
-      ytPlayerIframe.src = '';
+      ytPlayerIframe.setAttribute('src', '');;
     }
   }
 });
@@ -380,7 +381,7 @@ socket.on('stop-track', () => {
   currentTrack = null;
   nowPlayingInfo.innerHTML = '<p class="text-sm text-gray-400 italic">Queue is empty.</p>';
   if (role === 'host') {
-    ytPlayerIframe.src = '';
+    ytPlayerIframe.setAttribute('src', '');;
     isPaused = false;
     btnPlayPause.textContent = 'Pause';
     
@@ -473,8 +474,11 @@ function playVideo(track) {
   isPaused = false;
   btnPlayPause.textContent = 'Pause';
 
-  // 1. If the iframe is completely empty, load it normally (First Song)
-  if (!ytPlayerIframe.src) {
+  // FIX: Use getAttribute('src') to accurately check if it's empty
+  const currentSrc = ytPlayerIframe.getAttribute('src');
+
+  if (!currentSrc) {
+    // 1. First Song: Load the iframe normally
     const myOrigin = window.location.origin;
     
     ytPlayerIframe.onload = () => {
@@ -483,12 +487,12 @@ function playVideo(track) {
       sendPlayerCommand('setVolume', [currentVolume]);
     };
 
-    ytPlayerIframe.src = `https://www.youtube-nocookie.com/embed/${track.videoId}?autoplay=1&rel=0&enablejsapi=1&vq=small&origin=${encodeURIComponent(myOrigin)}`;
-  } 
-  // 2. If the iframe is already loaded, seamlessly swap the video (All Next Songs)
-  else {
-    // This bypasses the background Autoplay block because the iframe never unloads!
+    ytPlayerIframe.setAttribute('src', `https://www.youtube-nocookie.com/embed/${track.videoId}?autoplay=1&rel=0&enablejsapi=1&vq=small&origin=${encodeURIComponent(myOrigin)}`);
+  } else {
+    // 2. Next Songs: Seamlessly swap the video inside the existing iframe
+    // (This bypasses background autoplay blocking!)
     sendPlayerCommand('loadVideoById', [track.videoId, 0]);
+    sendPlayerCommand('playVideo'); 
     sendPlayerCommand('setVolume', [currentVolume]);
   }
 }
@@ -711,7 +715,7 @@ function leaveRoom() {
   disableWakeLock();
   
   if (role === 'host') {
-    ytPlayerIframe.src = '';
+    ytPlayerIframe.setAttribute('src', '');;
     if (hostCaptureStream) {
       hostCaptureStream.getTracks().forEach(t => t.stop());
       hostCaptureStream = null;
