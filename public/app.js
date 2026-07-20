@@ -18,45 +18,66 @@ const volumeSlider = document.getElementById('volume-slider');
 const ytPlayerIframe = document.getElementById('yt-player');
 const listenerAudio = document.getElementById('listener-audio');
 
-let currentRoomId = null;
-let role = null; // 'host' or 'listener'
-let currentVolume = volumeSlider.value;
-let currentTrack = null;
-
+// Host-Only Control Elements
 const hostControls = document.getElementById('host-controls');
 const btnPlayPause = document.getElementById('btn-play-pause');
 const btnNext = document.getElementById('btn-next');
 
+// Seekbar / Scrubber UI Elements
+const seekbar = document.getElementById('seekbar');
+const currentTimeLabel = document.getElementById('current-time-label');
+const durationLabel = document.getElementById('duration-label');
+
+let currentRoomId = null;
+let role = null; // 'host' or 'listener'
+let currentVolume = volumeSlider.value;
+let currentTrack = null;
 let isPaused = false;
 
+// Seekbar internal variables
+let elapsedSeconds = 0;
+let totalDurationSeconds = 0;
+let isUserDragging = false; // Guard flag to halt automated timeline snapping while scrubbing
+
 // Standard public STUN server so peers behind NAT can find each other.
-// No TURN server configured — if a listener is on a very restrictive
-// network (symmetric NAT / locked-down corporate wifi) the direct
-// connection may fail to establish. Good enough for friends-on-home-wifi
-// use, but worth knowing if someone reports "audio just never starts".
 const RTC_CONFIG = {
   iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
 };
 
 // --- HOST-ONLY STATE ---
-// The MediaStream captured from this same tab (self-capture) via getDisplayMedia.
 let hostCaptureStream = null;
-// One RTCPeerConnection per listener, keyed by that listener's socket.id.
 const hostPeerConnections = {};
 
 // --- LISTENER-ONLY STATE ---
 let listenerPeerConnection = null;
 
-// UI View Transition
-// function showJukeboxView(roomId, userRole) {
-//   currentRoomId = roomId;
-//   role = userRole;
-//   setupPanel.classList.add('hidden');
-//   jukeboxView.classList.remove('hidden');
-//   roomBadge.classList.remove('hidden');
-//   displayRoomId.textContent = roomId;
-// }
+// --- HELPERS ---
 
+// Converts "3:45" or "1:12:30" format string to total seconds
+function parseDuration(durationStr) {
+  if (!durationStr || typeof durationStr !== 'string') return 0;
+  const parts = durationStr.split(':').map(p => parseInt(p, 10));
+  if (parts.some(isNaN)) return 0;
+
+  let seconds = 0;
+  for (const part of parts) {
+    seconds = seconds * 60 + part;
+  }
+  return seconds;
+}
+
+// Converts seconds back to "0:00" format string
+function formatTime(seconds) {
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  const s = Math.floor(seconds % 60);
+  if (h > 0) {
+    return `${h}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+  }
+  return `${m}:${s.toString().padStart(2, '0')}`;
+}
+
+// UI View Transition
 function showJukeboxView(roomId, userRole) {
   currentRoomId = roomId;
   role = userRole;
@@ -65,7 +86,7 @@ function showJukeboxView(roomId, userRole) {
   roomBadge.classList.remove('hidden');
   displayRoomId.textContent = roomId;
 
-  // Show host playback controls only if the current user is the host
+  // Render host controls block only if user is hosting
   if (userRole === 'host') {
     hostControls.classList.remove('hidden');
   } else {
@@ -76,30 +97,18 @@ function showJukeboxView(roomId, userRole) {
 // --- HOST ACTION ---
 btnHost.addEventListener('click', async () => {
   try {
-    // video: true is required by getDisplayMedia even though we only want
-    // the audio track — Chrome will not grant tab-audio-only capture.
-    // Chrome supports "self-capture" (a tab sharing itself), so when the
-    // picker appears, pick "This Tab" and check "Also share tab audio".
-    // hostCaptureStream = await navigator.mediaDevices.getDisplayMedia({
-    //   video: {
-    //     displaySurface: "browser", // Encourages the browser to default to the "Tab" selection list
-    //   },
-    //   audio: true,
-    //   preferCurrentTab: true,      // Tells the browser to prioritize highlighting this specific tab
-    //   selfBrowserSurface: "include" // Explicitly ensures the current tab is visible in the list
-    // });
-
+    // We capture audio with speech-processing filters disabled to prevent music pumping
     hostCaptureStream = await navigator.mediaDevices.getDisplayMedia({
       video: {
-        displaySurface: "browser", // Encourages the browser to default to the "Tab" selection list
+        displaySurface: "browser", 
       },
       audio: {
-        echoCancellation: false,  // Disable echo filtering (helps preserve music frequencies)
-        noiseSuppression: false,   // Disable background noise removal (stops muffling beats)
-        autoGainControl: false     // Disable automatic volume adjustments (stops volume pumping)
+        echoCancellation: false, 
+        noiseSuppression: false,  
+        autoGainControl: false    
       },
-      preferCurrentTab: true,      // Tells the browser to prioritize highlighting this specific tab
-      selfBrowserSurface: "include" // Explicitly ensures the current tab is visible in the list
+      preferCurrentTab: true,      
+      selfBrowserSurface: "include" 
     });
 
     if (hostCaptureStream.getAudioTracks().length === 0) {
@@ -109,12 +118,10 @@ btnHost.addEventListener('click', async () => {
       return;
     }
 
-    // We don't need the video track for anything — drop it immediately so
-    // we're not holding a capture of the tab's visuals in memory for no reason.
+    // Drop video track immediately to conserve host CPU
     hostCaptureStream.getVideoTracks().forEach(t => t.stop());
 
-    // If the user manually stops sharing from Chrome's own "Stop sharing"
-    // toolbar/bar, treat that the same as clicking "Leave Room".
+    // Listen for manual "Stop sharing" trigger in browser chrome
     hostCaptureStream.getAudioTracks()[0].addEventListener('ended', () => {
       if (role === 'host') {
         alert('Tab audio sharing stopped. Closing the room.');
@@ -157,35 +164,6 @@ searchForm.addEventListener('submit', async (e) => {
   }
 });
 
-// function displaySearchResults(results) {
-//   if (results.length === 0) {
-//     searchResults.innerHTML = '<p class="text-sm text-gray-400">No results found.</p>';
-//     return;
-//   }
-
-//   searchResults.innerHTML = '';
-//   results.forEach(track => {
-//     const item = document.createElement('div');
-//     item.className = "flex items-center gap-3 p-2 bg-gray-700/30 border border-gray-700 rounded hover:bg-gray-700/50 transition";
-//     item.innerHTML = `
-//       <img src="${track.thumbnail}" class="w-12 h-9 object-cover rounded">
-//       <div class="flex-1 min-w-0">
-//         <p class="text-sm font-semibold text-white truncate">${track.title}</p>
-//         <p class="text-xs text-gray-400">${track.duration}</p>
-//       </div>
-//       <button class="add-btn bg-indigo-600 hover:bg-indigo-500 text-xs font-bold py-1 px-3 rounded transition">
-//         Queue
-//       </button>
-//     `;
-
-//     item.querySelector('.add-btn').addEventListener('click', () => {
-//       socket.emit('add-to-queue', currentRoomId, track);
-//     });
-
-//     searchResults.appendChild(item);
-//   });
-// }
-
 function displaySearchResults(results) {
   if (results.length === 0) {
     searchResults.innerHTML = '<p class="text-sm text-gray-400">No results found.</p>';
@@ -210,18 +188,18 @@ function displaySearchResults(results) {
     const addBtn = item.querySelector('.add-btn');
 
     addBtn.addEventListener('click', () => {
-      // 1. Immediately disable the button to block double clicks
+      // 1. Instantly disable the queue button to block double clicks
       addBtn.disabled = true;
 
-      // 2. Change styling and text for visual confirmation
+      // 2. Change appearance for positive action feedback
       addBtn.textContent = 'Added! ✓';
       addBtn.classList.remove('bg-indigo-600', 'hover:bg-indigo-500');
       addBtn.classList.add('bg-emerald-600', 'cursor-not-allowed');
 
-      // 3. Send the socket event to add the track to the queue
+      // 3. Emit the queue event
       socket.emit('add-to-queue', currentRoomId, track);
 
-      // 4. Re-enable the button after 1.5 seconds in case they want to queue it again
+      // 4. Cooldown block release after 1.5s
       setTimeout(() => {
         addBtn.disabled = false;
         addBtn.textContent = 'Queue';
@@ -235,10 +213,6 @@ function displaySearchResults(results) {
 }
 
 // --- VOLUME ---
-// Host: controls the hidden YouTube iframe (which is what everyone,
-// including the host, actually hears via the self-captured tab audio).
-// Listener: controls their own local <audio> element only — this does NOT
-// affect what other listeners or the host hear, it's purely local playback volume.
 volumeSlider.addEventListener('input', (e) => {
   currentVolume = e.target.value;
   if (role === 'host') {
@@ -266,8 +240,7 @@ function sendPlayerHandshake(event) {
   }
 }
 
-// --- DETECT WHEN SONG ENDS (host only — only the host runs the iframe) ---
-
+// --- INTERCEPT POSTMESSAGE EVENTS FROM YOUTUBE IFRAME (Host only) ---
 window.addEventListener('message', (event) => {
   if (role !== 'host') return;
   if (event.origin === 'https://www.youtube-nocookie.com') {
@@ -279,6 +252,17 @@ window.addEventListener('message', (event) => {
         data = event.data;
       }
 
+      // 1. Capture real-time progress updates directly from YouTube's playback clock
+      if (data && data.event === 'infoDelivery' && data.info) {
+        if (typeof data.info.currentTime !== 'undefined' && !isUserDragging) {
+          const actualTime = Math.floor(data.info.currentTime);
+          elapsedSeconds = actualTime;
+          seekbar.value = actualTime;
+          currentTimeLabel.textContent = formatTime(actualTime);
+        }
+      }
+
+      // 2. Listen for track-ended states (to advance room queue)
       let isEnded = false;
       if (data && data.event === 'infoDelivery' && data.info && data.info.playerState === 0) {
         isEnded = true;
@@ -307,9 +291,6 @@ socket.on('sync-state', (state) => {
     updateNowPlayingUI(state.currentTrack);
     currentTrack = state.currentTrack;
 
-    // Only the host actually loads/plays the video. Listeners get their
-    // audio purely from the WebRTC stream — there's no local seek/reload
-    // to do here, the live stream is already wherever the host's playback is.
     if (role === 'host') {
       const isNewTrack = !ytPlayerIframe.src || !ytPlayerIframe.src.includes(state.currentTrack.videoId);
       if (isNewTrack) {
@@ -338,14 +319,6 @@ socket.on('queue-updated', (queue) => {
   updateQueueUI(queue);
 });
 
-// socket.on('stop-track', () => {
-//   currentTrack = null;
-//   nowPlayingInfo.innerHTML = '<p class="text-sm text-gray-400 italic">Queue is empty.</p>';
-//   if (role === 'host') {
-//     ytPlayerIframe.src = '';
-//   }
-// });
-
 socket.on('stop-track', () => {
   currentTrack = null;
   nowPlayingInfo.innerHTML = '<p class="text-sm text-gray-400 italic">Queue is empty.</p>';
@@ -353,6 +326,11 @@ socket.on('stop-track', () => {
     ytPlayerIframe.src = '';
     isPaused = false;
     btnPlayPause.textContent = 'Pause';
+    
+    // Clear out timeline views
+    seekbar.value = 0;
+    currentTimeLabel.textContent = "0:00";
+    durationLabel.textContent = "0:00";
   }
 });
 
@@ -362,31 +340,30 @@ function updateNowPlayingUI(track) {
       <img src="${track.thumbnail}" class="w-16 h-12 object-cover rounded border border-gray-700">
       <div class="flex-1 min-w-0">
         <p class="text-sm font-bold text-white truncate">${track.title}</p>
-        <p class="text-xs text-indigo-400">${role === 'host' ? 'Now streaming' : 'Now playing'}</p>
+        <p id="track-status" class="text-xs text-indigo-400">${role === 'host' ? 'Now streaming' : 'Now playing'}</p>
       </div>
     </div>
   `;
 }
 
-// function playVideo(track) {
-//   const myOrigin = window.location.origin;
-
-//   ytPlayerIframe.src = `https://www.youtube-nocookie.com/embed/${track.videoId}?autoplay=1&rel=0&enablejsapi=1&vq=small&origin=${encodeURIComponent(myOrigin)}`;
-
-//   ytPlayerIframe.onload = () => {
-//     sendPlayerHandshake('listening');
-//     sendPlayerCommand('addEventListener', ['onStateChange']);
-//     sendPlayerCommand('setVolume', [currentVolume]);
-//   };
-// }
-
 function playVideo(track) {
+  // Parse and establish boundaries for our seekbar
+  isUserDragging = false;
+  elapsedSeconds = 0;
+  totalDurationSeconds = parseDuration(track.duration);
+
+  seekbar.max = totalDurationSeconds;
+  seekbar.value = 0;
+  currentTimeLabel.textContent = "0:00";
+  durationLabel.textContent = track.duration || "0:00";
+
   const myOrigin = window.location.origin;
 
-  // Reset pause state when a new track starts
+  // Reset local pause toggle states
   isPaused = false;
   btnPlayPause.textContent = 'Pause';
 
+  // Load lowest available video quality embed
   ytPlayerIframe.src = `https://www.youtube-nocookie.com/embed/${track.videoId}?autoplay=1&rel=0&enablejsapi=1&vq=small&origin=${encodeURIComponent(myOrigin)}`;
 
   ytPlayerIframe.onload = () => {
@@ -437,8 +414,6 @@ socket.on('connect', () => {
 
 // --- HOST SIDE ---
 
-// A new listener joined the room — set up a dedicated RTCPeerConnection
-// for them, add our captured audio track to it, and send them an offer.
 socket.on('listener-joined', async (listenerId) => {
   if (role !== 'host' || !hostCaptureStream) return;
 
@@ -496,12 +471,9 @@ function cleanupHostPeerConnection(listenerId) {
 
 // --- LISTENER SIDE ---
 
-// The host sent us an offer — answer it and start receiving audio.
 socket.on('webrtc-offer', async ({ fromId, offer }) => {
   if (role !== 'listener') return;
 
-  // If we somehow already had a connection (e.g. host reconnected and
-  // re-offered), tear down the old one first.
   if (listenerPeerConnection) {
     listenerPeerConnection.close();
   }
@@ -513,8 +485,6 @@ socket.on('webrtc-offer', async ({ fromId, offer }) => {
     listenerAudio.srcObject = event.streams[0];
     listenerAudio.volume = currentVolume / 100;
     listenerAudio.play().catch(err => {
-      // Autoplay of audio-with-sound can be blocked until the user
-      // interacts with the page. Surface this clearly instead of failing silently.
       console.warn('Autoplay was blocked, waiting for user interaction:', err);
     });
   };
@@ -549,32 +519,64 @@ socket.on('webrtc-ice-candidate', async ({ fromId, candidate }) => {
   }
 });
 
-// A tab that autoplay-blocked the <audio> element will unblock as soon as
-// the user interacts with the page at all — nudge playback on first click.
+// Autoplay release fallback listener
 document.addEventListener('click', () => {
   if (role === 'listener' && listenerAudio.srcObject && listenerAudio.paused) {
     listenerAudio.play().catch(() => {});
   }
 }, { once: false });
 
+// --- PLAYBACK SYNC NOTIFICATIONS FOR LISTENERS ---
+socket.on('track-paused', () => {
+  const statusElement = document.getElementById('track-status');
+  if (statusElement) {
+    statusElement.textContent = 'Paused';
+    statusElement.classList.remove('text-indigo-400');
+    statusElement.classList.add('text-amber-500');
+  }
+});
+
+socket.on('track-resumed', () => {
+  const statusElement = document.getElementById('track-status');
+  if (statusElement) {
+    statusElement.textContent = role === 'host' ? 'Now streaming' : 'Now playing';
+    statusElement.classList.remove('text-amber-500');
+    statusElement.classList.add('text-indigo-400');
+  }
+});
+
+// --- CONTROLS ---
+
 btnPlayPause.addEventListener('click', () => {
   if (role !== 'host' || !currentTrack) return;
+
+  const statusElement = document.getElementById('track-status');
 
   if (isPaused) {
     sendPlayerCommand('playVideo');
     btnPlayPause.textContent = 'Pause';
+    if (statusElement) {
+      statusElement.textContent = 'Now streaming';
+      statusElement.classList.remove('text-amber-500');
+      statusElement.classList.add('text-indigo-400');
+    }
     isPaused = false;
+    socket.emit('track-resumed', currentRoomId);
   } else {
     sendPlayerCommand('pauseVideo');
     btnPlayPause.textContent = 'Play';
+    if (statusElement) {
+      statusElement.textContent = 'Paused';
+      statusElement.classList.remove('text-indigo-400');
+      statusElement.classList.add('text-amber-500');
+    }
     isPaused = true;
+    socket.emit('track-paused', currentRoomId);
   }
 });
 
 btnNext.addEventListener('click', () => {
   if (role !== 'host' || !currentTrack) return;
-  
-  // Reuses the existing song-ended event to force-advance the queue on the server
   socket.emit('song-ended', currentRoomId, currentTrack.videoId);
 });
 
@@ -596,6 +598,13 @@ function leaveRoom() {
     listenerAudio.srcObject = null;
   }
 
+  // Clear timeline and state parameters back to blank
+  seekbar.value = 0;
+  currentTimeLabel.textContent = "0:00";
+  durationLabel.textContent = "0:00";
+  isPaused = false;
+  btnPlayPause.textContent = 'Pause';
+
   setupPanel.classList.remove('hidden');
   jukeboxView.classList.add('hidden');
   roomBadge.classList.add('hidden');
@@ -609,3 +618,25 @@ function leaveRoom() {
   role = null;
   socket.emit('leave-room');
 }
+
+// --- SEEKBAR / SCRUBBING EVENT LISTENERS ---
+
+seekbar.addEventListener('input', (e) => {
+  if (role !== 'host') return;
+  isUserDragging = true; // Lock timeline adjustments from incoming WS updates while dragging
+  const tempTime = parseInt(e.target.value, 10);
+  currentTimeLabel.textContent = formatTime(tempTime);
+});
+
+seekbar.addEventListener('change', (e) => {
+  if (role !== 'host' || !currentTrack) return;
+  const targetSeconds = parseInt(e.target.value, 10);
+  
+  elapsedSeconds = targetSeconds;
+  sendPlayerCommand('seekTo', [targetSeconds, true]);
+
+  // Brief delay to allow the player to update before unlocking timeline snaps
+  setTimeout(() => {
+    isUserDragging = false;
+  }, 500);
+});

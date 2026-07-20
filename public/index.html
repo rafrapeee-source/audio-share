@@ -82,6 +82,13 @@
             </button>
           </div>
 
+          <!-- Host Seekbar / Scrubber -->
+          <div id="host-seekbar-container" class="flex items-center gap-2 mt-2 w-full">
+            <span id="current-time-label" class="text-[10px] text-gray-400 font-mono">0:00</span>
+            <input type="range" id="seekbar" min="0" max="100" value="0" class="flex-1 accent-indigo-500 h-1 bg-gray-700 rounded-lg cursor-pointer">
+            <span id="duration-label" class="text-[10px] text-gray-400 font-mono">0:00</span>
+          </div>
+
           <!-- Local volume control -->
           <div class="mt-4 flex items-center gap-2">
             <span class="text-xs text-gray-400">Vol:</span>
