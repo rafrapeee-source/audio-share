@@ -42,6 +42,9 @@ let isUserDragging = false; // Guard flag to halt automated timeline snapping wh
 const btnSolo = document.getElementById('btn-solo'); // Selector for new button
 let isSoloMode = false; // Flag to track if the session is Solo or Multiplayer
 
+const silentAudio = new Audio('data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA');
+silentAudio.loop = true;
+
 // Standard public STUN server so peers behind NAT can find each other.
 const RTC_CONFIG = {
   iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
@@ -150,6 +153,10 @@ btnHost.addEventListener('click', async () => {
 // --- SOLO ACTION ---
 btnSolo.addEventListener('click', () => {
   isSoloMode = true;
+
+  silentAudio.play().catch(err => {
+    console.warn("Silent audio wake-lock was blocked:", err);
+  });
 
   // We bypass getDisplayMedia entirely. No audio sharing or tab sharing prompts!
   const roomId = Math.random().toString(36).substring(2, 8).toUpperCase();
@@ -634,6 +641,9 @@ btnNext.addEventListener('click', () => {
 btnLeave.addEventListener('click', leaveRoom);
 
 function leaveRoom() {
+  silentAudio.pause();
+  silentAudio.currentTime = 0;
+  
   if (role === 'host') {
     ytPlayerIframe.src = '';
     if (hostCaptureStream) {
