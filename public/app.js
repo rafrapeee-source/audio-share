@@ -23,6 +23,12 @@ let role = null; // 'host' or 'listener'
 let currentVolume = volumeSlider.value;
 let currentTrack = null;
 
+const hostControls = document.getElementById('host-controls');
+const btnPlayPause = document.getElementById('btn-play-pause');
+const btnNext = document.getElementById('btn-next');
+
+let isPaused = false;
+
 // Standard public STUN server so peers behind NAT can find each other.
 // No TURN server configured — if a listener is on a very restrictive
 // network (symmetric NAT / locked-down corporate wifi) the direct
@@ -42,6 +48,15 @@ const hostPeerConnections = {};
 let listenerPeerConnection = null;
 
 // UI View Transition
+// function showJukeboxView(roomId, userRole) {
+//   currentRoomId = roomId;
+//   role = userRole;
+//   setupPanel.classList.add('hidden');
+//   jukeboxView.classList.remove('hidden');
+//   roomBadge.classList.remove('hidden');
+//   displayRoomId.textContent = roomId;
+// }
+
 function showJukeboxView(roomId, userRole) {
   currentRoomId = roomId;
   role = userRole;
@@ -49,6 +64,13 @@ function showJukeboxView(roomId, userRole) {
   jukeboxView.classList.remove('hidden');
   roomBadge.classList.remove('hidden');
   displayRoomId.textContent = roomId;
+
+  // Show host playback controls only if the current user is the host
+  if (userRole === 'host') {
+    hostControls.classList.remove('hidden');
+  } else {
+    hostControls.classList.add('hidden');
+  }
 }
 
 // --- HOST ACTION ---
@@ -58,11 +80,24 @@ btnHost.addEventListener('click', async () => {
     // the audio track — Chrome will not grant tab-audio-only capture.
     // Chrome supports "self-capture" (a tab sharing itself), so when the
     // picker appears, pick "This Tab" and check "Also share tab audio".
+    // hostCaptureStream = await navigator.mediaDevices.getDisplayMedia({
+    //   video: {
+    //     displaySurface: "browser", // Encourages the browser to default to the "Tab" selection list
+    //   },
+    //   audio: true,
+    //   preferCurrentTab: true,      // Tells the browser to prioritize highlighting this specific tab
+    //   selfBrowserSurface: "include" // Explicitly ensures the current tab is visible in the list
+    // });
+
     hostCaptureStream = await navigator.mediaDevices.getDisplayMedia({
       video: {
         displaySurface: "browser", // Encourages the browser to default to the "Tab" selection list
       },
-      audio: true,
+      audio: {
+        echoCancellation: false,  // Disable echo filtering (helps preserve music frequencies)
+        noiseSuppression: false,   // Disable background noise removal (stops muffling beats)
+        autoGainControl: false     // Disable automatic volume adjustments (stops volume pumping)
+      },
       preferCurrentTab: true,      // Tells the browser to prioritize highlighting this specific tab
       selfBrowserSurface: "include" // Explicitly ensures the current tab is visible in the list
     });
@@ -122,6 +157,35 @@ searchForm.addEventListener('submit', async (e) => {
   }
 });
 
+// function displaySearchResults(results) {
+//   if (results.length === 0) {
+//     searchResults.innerHTML = '<p class="text-sm text-gray-400">No results found.</p>';
+//     return;
+//   }
+
+//   searchResults.innerHTML = '';
+//   results.forEach(track => {
+//     const item = document.createElement('div');
+//     item.className = "flex items-center gap-3 p-2 bg-gray-700/30 border border-gray-700 rounded hover:bg-gray-700/50 transition";
+//     item.innerHTML = `
+//       <img src="${track.thumbnail}" class="w-12 h-9 object-cover rounded">
+//       <div class="flex-1 min-w-0">
+//         <p class="text-sm font-semibold text-white truncate">${track.title}</p>
+//         <p class="text-xs text-gray-400">${track.duration}</p>
+//       </div>
+//       <button class="add-btn bg-indigo-600 hover:bg-indigo-500 text-xs font-bold py-1 px-3 rounded transition">
+//         Queue
+//       </button>
+//     `;
+
+//     item.querySelector('.add-btn').addEventListener('click', () => {
+//       socket.emit('add-to-queue', currentRoomId, track);
+//     });
+
+//     searchResults.appendChild(item);
+//   });
+// }
+
 function displaySearchResults(results) {
   if (results.length === 0) {
     searchResults.innerHTML = '<p class="text-sm text-gray-400">No results found.</p>';
@@ -143,8 +207,27 @@ function displaySearchResults(results) {
       </button>
     `;
 
-    item.querySelector('.add-btn').addEventListener('click', () => {
+    const addBtn = item.querySelector('.add-btn');
+
+    addBtn.addEventListener('click', () => {
+      // 1. Immediately disable the button to block double clicks
+      addBtn.disabled = true;
+
+      // 2. Change styling and text for visual confirmation
+      addBtn.textContent = 'Added! ✓';
+      addBtn.classList.remove('bg-indigo-600', 'hover:bg-indigo-500');
+      addBtn.classList.add('bg-emerald-600', 'cursor-not-allowed');
+
+      // 3. Send the socket event to add the track to the queue
       socket.emit('add-to-queue', currentRoomId, track);
+
+      // 4. Re-enable the button after 1.5 seconds in case they want to queue it again
+      setTimeout(() => {
+        addBtn.disabled = false;
+        addBtn.textContent = 'Queue';
+        addBtn.classList.remove('bg-emerald-600', 'cursor-not-allowed');
+        addBtn.classList.add('bg-indigo-600', 'hover:bg-indigo-500');
+      }, 1500);
     });
 
     searchResults.appendChild(item);
@@ -255,11 +338,21 @@ socket.on('queue-updated', (queue) => {
   updateQueueUI(queue);
 });
 
+// socket.on('stop-track', () => {
+//   currentTrack = null;
+//   nowPlayingInfo.innerHTML = '<p class="text-sm text-gray-400 italic">Queue is empty.</p>';
+//   if (role === 'host') {
+//     ytPlayerIframe.src = '';
+//   }
+// });
+
 socket.on('stop-track', () => {
   currentTrack = null;
   nowPlayingInfo.innerHTML = '<p class="text-sm text-gray-400 italic">Queue is empty.</p>';
   if (role === 'host') {
     ytPlayerIframe.src = '';
+    isPaused = false;
+    btnPlayPause.textContent = 'Pause';
   }
 });
 
@@ -275,8 +368,24 @@ function updateNowPlayingUI(track) {
   `;
 }
 
+// function playVideo(track) {
+//   const myOrigin = window.location.origin;
+
+//   ytPlayerIframe.src = `https://www.youtube-nocookie.com/embed/${track.videoId}?autoplay=1&rel=0&enablejsapi=1&vq=small&origin=${encodeURIComponent(myOrigin)}`;
+
+//   ytPlayerIframe.onload = () => {
+//     sendPlayerHandshake('listening');
+//     sendPlayerCommand('addEventListener', ['onStateChange']);
+//     sendPlayerCommand('setVolume', [currentVolume]);
+//   };
+// }
+
 function playVideo(track) {
   const myOrigin = window.location.origin;
+
+  // Reset pause state when a new track starts
+  isPaused = false;
+  btnPlayPause.textContent = 'Pause';
 
   ytPlayerIframe.src = `https://www.youtube-nocookie.com/embed/${track.videoId}?autoplay=1&rel=0&enablejsapi=1&vq=small&origin=${encodeURIComponent(myOrigin)}`;
 
@@ -447,6 +556,27 @@ document.addEventListener('click', () => {
     listenerAudio.play().catch(() => {});
   }
 }, { once: false });
+
+btnPlayPause.addEventListener('click', () => {
+  if (role !== 'host' || !currentTrack) return;
+
+  if (isPaused) {
+    sendPlayerCommand('playVideo');
+    btnPlayPause.textContent = 'Pause';
+    isPaused = false;
+  } else {
+    sendPlayerCommand('pauseVideo');
+    btnPlayPause.textContent = 'Play';
+    isPaused = true;
+  }
+});
+
+btnNext.addEventListener('click', () => {
+  if (role !== 'host' || !currentTrack) return;
+  
+  // Reuses the existing song-ended event to force-advance the queue on the server
+  socket.emit('song-ended', currentRoomId, currentTrack.videoId);
+});
 
 btnLeave.addEventListener('click', leaveRoom);
 

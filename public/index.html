@@ -71,6 +71,17 @@
           <div id="now-playing-info">
             <p class="text-sm text-gray-400 italic">Queue is empty. Search and add a track to start.</p>
           </div>
+
+          <!-- Host Playback Controls (Visible only to Host) -->
+          <div id="host-controls" class="hidden flex gap-2 mt-3">
+            <button id="btn-play-pause" class="flex-1 bg-indigo-600 hover:bg-indigo-500 text-xs font-bold py-1.5 px-3 rounded transition">
+              Pause
+            </button>
+            <button id="btn-next" class="flex-1 bg-gray-700 hover:bg-gray-600 text-xs font-bold py-1.5 px-3 rounded transition">
+              Next ⏭
+            </button>
+          </div>
+
           <!-- Local volume control -->
           <div class="mt-4 flex items-center gap-2">
             <span class="text-xs text-gray-400">Vol:</span>
