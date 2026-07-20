@@ -43,6 +43,43 @@ let isUserDragging = false; // Guard flag to halt automated timeline snapping wh
 const btnSolo = document.getElementById('btn-solo'); // Selector for new button
 let isSoloMode = false; // Flag to track if the session is Solo or Multiplayer
 
+let audioCtx = null;
+let wakeLockOscillator = null;
+
+function enableWakeLock() {
+  if (!audioCtx) {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  }
+  // If the browser suspended the context, wake it up
+  if (audioCtx.state === 'suspended') {
+    audioCtx.resume();
+  }
+  
+  // Prevent duplicate oscillators
+  if (wakeLockOscillator) return;
+
+  // Create an inaudible high-frequency tone (20,000 Hz is usually above adult human hearing)
+  wakeLockOscillator = audioCtx.createOscillator();
+  wakeLockOscillator.type = 'sine';
+  wakeLockOscillator.frequency.value = 20000; 
+  
+  // Turn the volume down to 1% just to be safe
+  const gainNode = audioCtx.createGain();
+  gainNode.gain.value = 0.01; 
+  
+  wakeLockOscillator.connect(gainNode);
+  gainNode.connect(audioCtx.destination);
+  wakeLockOscillator.start();
+}
+
+function disableWakeLock() {
+  if (wakeLockOscillator) {
+    wakeLockOscillator.stop();
+    wakeLockOscillator.disconnect();
+    wakeLockOscillator = null;
+  }
+}
+
 // Standard public STUN server so peers behind NAT can find each other.
 const RTC_CONFIG = {
   iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
@@ -152,6 +189,8 @@ btnHost.addEventListener('click', async () => {
 btnSolo.addEventListener('click', () => {
   isSoloMode = true;
 
+  enableWakeLock();
+
   // We bypass getDisplayMedia entirely. No audio sharing or tab sharing prompts!
   const roomId = Math.random().toString(36).substring(2, 8).toUpperCase();
   socket.emit('create-room', roomId);
@@ -241,6 +280,24 @@ volumeSlider.addEventListener('input', (e) => {
   }
 });
 
+// function sendPlayerCommand(func, args = []) {
+//   if (ytPlayerIframe && ytPlayerIframe.contentWindow) {
+//     ytPlayerIframe.contentWindow.postMessage(JSON.stringify({
+//       event: 'command',
+//       func: func,
+//       args: args
+//     }), 'https://www.youtube-nocookie.com');
+//   }
+// }
+
+// function sendPlayerHandshake(event) {
+//   if (ytPlayerIframe && ytPlayerIframe.contentWindow) {
+//     ytPlayerIframe.contentWindow.postMessage(JSON.stringify({
+//       event: event
+//     }), 'https://www.youtube-nocookie.com');
+//   }
+// }
+
 function sendPlayerCommand(func, args = []) {
   // GUARD: Don't send messages if the iframe isn't currently on YouTube
   const currentSrc = ytPlayerIframe.getAttribute('src');
@@ -297,6 +354,11 @@ window.addEventListener('message', (event) => {
         isEnded = true;
       }
 
+      // if (isEnded && currentTrack) {
+      //   console.log("Song finished. Notifying server...");
+      //   socket.emit('song-ended', currentRoomId, currentTrack.videoId);
+      // }
+
       if (isEnded && currentTrack && !isTransitioning) {
         isTransitioning = true; // Lock it so it doesn't fire again for this song
         console.log("Song finished. Notifying server...");
@@ -330,8 +392,7 @@ socket.on('sync-state', (state) => {
     currentTrack = null;
     nowPlayingInfo.innerHTML = '<p class="text-sm text-gray-400 italic">Queue is empty. Search and add a track to start.</p>';
     if (role === 'host') {
-      ytPlayerIframe.onload = null;
-      ytPlayerIframe.setAttribute('src', '');
+      ytPlayerIframe.setAttribute('src', '');;
     }
   }
 });
@@ -349,11 +410,27 @@ socket.on('queue-updated', (queue) => {
   updateQueueUI(queue);
 });
 
+// socket.on('stop-track', () => {
+//   currentTrack = null;
+//   nowPlayingInfo.innerHTML = '<p class="text-sm text-gray-400 italic">Queue is empty.</p>';
+//   if (role === 'host') {
+//     ytPlayerIframe.setAttribute('src', '');;
+//     isPaused = false;
+//     btnPlayPause.textContent = 'Pause';
+    
+//     // Clear out timeline views
+//     seekbar.value = 0;
+//     currentTimeLabel.textContent = "0:00";
+//     durationLabel.textContent = "0:00";
+//   }
+// });
+
 socket.on('stop-track', () => {
   currentTrack = null;
   nowPlayingInfo.innerHTML = '<p class="text-sm text-gray-400 italic">Queue is empty.</p>';
+  
   if (role === 'host') {
-    ytPlayerIframe.onload = null; // prevent the ghost load
+    ytPlayerIframe.onload = null; // <--- ADD THIS to prevent the ghost load
     ytPlayerIframe.setAttribute('src', '');
     isPaused = false;
     btnPlayPause.textContent = 'Pause';
@@ -377,10 +454,65 @@ function updateNowPlayingUI(track) {
   `;
 }
 
+// function playVideo(track) {
+//   // Parse and establish boundaries for our seekbar
+//   isUserDragging = false;
+//   elapsedSeconds = 0;
+//   totalDurationSeconds = parseDuration(track.duration);
+
+//   seekbar.max = totalDurationSeconds;
+//   seekbar.value = 0;
+//   currentTimeLabel.textContent = "0:00";
+//   durationLabel.textContent = track.duration || "0:00";
+
+//   const myOrigin = window.location.origin;
+
+//   // Reset local pause toggle states
+//   isPaused = false;
+//   btnPlayPause.textContent = 'Pause';
+
+//   // Load lowest available video quality embed
+//   ytPlayerIframe.src = `https://www.youtube-nocookie.com/embed/${track.videoId}?autoplay=1&rel=0&enablejsapi=1&vq=small&origin=${encodeURIComponent(myOrigin)}`;
+
+//   ytPlayerIframe.onload = () => {
+//     sendPlayerHandshake('listening');
+//     sendPlayerCommand('addEventListener', ['onStateChange']);
+//     sendPlayerCommand('setVolume', [currentVolume]);
+//   };
+// }
+
+// function playVideo(track) {
+//   // Parse and establish boundaries for our seekbar
+//   isUserDragging = false;
+//   elapsedSeconds = 0;
+//   totalDurationSeconds = parseDuration(track.duration);
+
+//   seekbar.max = totalDurationSeconds;
+//   seekbar.value = 0;
+//   currentTimeLabel.textContent = "0:00";
+//   durationLabel.textContent = track.duration || "0:00";
+
+//   const myOrigin = window.location.origin;
+
+//   // Reset local pause toggle states
+//   isPaused = false;
+//   btnPlayPause.textContent = 'Pause';
+
+//   // 1. Define the onload listener FIRST to prevent browser cache race conditions
+//   ytPlayerIframe.onload = () => {
+//     sendPlayerHandshake('listening');
+//     sendPlayerCommand('addEventListener', ['onStateChange']);
+//     sendPlayerCommand('setVolume', [currentVolume]);
+//   };
+
+//   // 2. Set the src SECOND (triggers the load safely)
+//   ytPlayerIframe.src = `https://www.youtube-nocookie.com/embed/${track.videoId}?autoplay=1&rel=0&enablejsapi=1&vq=small&origin=${encodeURIComponent(myOrigin)}`;
+// }
+
 function playVideo(track) {
   // Parse and establish boundaries for our seekbar
   isUserDragging = false;
-  isTransitioning = false; // unlock the next song so it can end properly
+  isTransitioning = false;
   elapsedSeconds = 0;
   totalDurationSeconds = parseDuration(track.duration);
 
@@ -393,6 +525,7 @@ function playVideo(track) {
   isPaused = false;
   btnPlayPause.textContent = 'Pause';
 
+  // FIX: Use getAttribute('src') to accurately check if it's empty
   const currentSrc = ytPlayerIframe.getAttribute('src');
 
   if (!currentSrc) {
@@ -630,12 +763,10 @@ btnNext.addEventListener('click', () => {
 btnLeave.addEventListener('click', leaveRoom);
 
 function leaveRoom() {
+  disableWakeLock();
+  
   if (role === 'host') {
-    // 1. Prevent CORS errors and ghost loads when clearing the iframe
-    ytPlayerIframe.onload = null; 
-    ytPlayerIframe.setAttribute('src', '');
-    
-    // 2. Clean up media streams and connections
+    ytPlayerIframe.setAttribute('src', '');;
     if (hostCaptureStream) {
       hostCaptureStream.getTracks().forEach(t => t.stop());
       hostCaptureStream = null;
@@ -653,13 +784,11 @@ function leaveRoom() {
   seekbar.value = 0;
   currentTimeLabel.textContent = "0:00";
   durationLabel.textContent = "0:00";
-  
   isPaused = false;
-  isTransitioning = false; // Reset our double-log lock
   btnPlayPause.textContent = 'Pause';
+
   isSoloMode = false;
 
-  // Reset UI Views
   setupPanel.classList.remove('hidden');
   jukeboxView.classList.add('hidden');
   roomBadge.classList.add('hidden');
@@ -668,13 +797,9 @@ function leaveRoom() {
   queueListElement.innerHTML = '<p class="text-xs text-gray-500 italic">No songs queued.</p>';
   searchInput.value = '';
   inputRoomId.value = '';
-  
-  // Clear application state
   currentRoomId = null;
   currentTrack = null;
   role = null;
-  
-  // Tell the server we left
   socket.emit('leave-room');
 }
 
