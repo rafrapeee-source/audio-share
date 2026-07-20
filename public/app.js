@@ -364,6 +364,33 @@ function updateNowPlayingUI(track) {
   `;
 }
 
+// function playVideo(track) {
+//   // Parse and establish boundaries for our seekbar
+//   isUserDragging = false;
+//   elapsedSeconds = 0;
+//   totalDurationSeconds = parseDuration(track.duration);
+
+//   seekbar.max = totalDurationSeconds;
+//   seekbar.value = 0;
+//   currentTimeLabel.textContent = "0:00";
+//   durationLabel.textContent = track.duration || "0:00";
+
+//   const myOrigin = window.location.origin;
+
+//   // Reset local pause toggle states
+//   isPaused = false;
+//   btnPlayPause.textContent = 'Pause';
+
+//   // Load lowest available video quality embed
+//   ytPlayerIframe.src = `https://www.youtube-nocookie.com/embed/${track.videoId}?autoplay=1&rel=0&enablejsapi=1&vq=small&origin=${encodeURIComponent(myOrigin)}`;
+
+//   ytPlayerIframe.onload = () => {
+//     sendPlayerHandshake('listening');
+//     sendPlayerCommand('addEventListener', ['onStateChange']);
+//     sendPlayerCommand('setVolume', [currentVolume]);
+//   };
+// }
+
 function playVideo(track) {
   // Parse and establish boundaries for our seekbar
   isUserDragging = false;
@@ -381,14 +408,15 @@ function playVideo(track) {
   isPaused = false;
   btnPlayPause.textContent = 'Pause';
 
-  // Load lowest available video quality embed
-  ytPlayerIframe.src = `https://www.youtube-nocookie.com/embed/${track.videoId}?autoplay=1&rel=0&enablejsapi=1&vq=small&origin=${encodeURIComponent(myOrigin)}`;
-
+  // 1. Define the onload listener FIRST to prevent browser cache race conditions
   ytPlayerIframe.onload = () => {
     sendPlayerHandshake('listening');
     sendPlayerCommand('addEventListener', ['onStateChange']);
     sendPlayerCommand('setVolume', [currentVolume]);
   };
+
+  // 2. Set the src SECOND (triggers the load safely)
+  ytPlayerIframe.src = `https://www.youtube-nocookie.com/embed/${track.videoId}?autoplay=1&rel=0&enablejsapi=1&vq=small&origin=${encodeURIComponent(myOrigin)}`;
 }
 
 function updateQueueUI(queue) {
