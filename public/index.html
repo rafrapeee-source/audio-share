@@ -73,20 +73,22 @@
           </div>
 
           <!-- Host Playback Controls (Visible only to Host) -->
-          <div id="host-controls" class="hidden flex gap-2 mt-3">
-            <button id="btn-play-pause" class="flex-1 bg-indigo-600 hover:bg-indigo-500 text-xs font-bold py-1.5 px-3 rounded transition">
-              Pause
-            </button>
-            <button id="btn-next" class="flex-1 bg-gray-700 hover:bg-gray-600 text-xs font-bold py-1.5 px-3 rounded transition">
-              Next ⏭
-            </button>
-          </div>
+          <div id="host-controls" class="hidden flex flex-col gap-2 mt-3">
+            <div class="flex gap-2">
+              <button id="btn-play-pause" class="flex-1 bg-indigo-600 hover:bg-indigo-500 text-xs font-bold py-1.5 px-3 rounded transition">
+                Pause
+              </button>
+              <button id="btn-next" class="flex-1 bg-gray-700 hover:bg-gray-600 text-xs font-bold py-1.5 px-3 rounded transition">
+                Next ⏭
+              </button>
+            </div>
 
-          <!-- Host Seekbar / Scrubber -->
-          <div id="host-seekbar-container" class="flex items-center gap-2 mt-2 w-full">
-            <span id="current-time-label" class="text-[10px] text-gray-400 font-mono">0:00</span>
-            <input type="range" id="seekbar" min="0" max="100" value="0" class="flex-1 accent-indigo-500 h-1 bg-gray-700 rounded-lg cursor-pointer">
-            <span id="duration-label" class="text-[10px] text-gray-400 font-mono">0:00</span>
+            <!-- Host Seekbar / Scrubber (Moved inside host-controls) -->
+            <div id="host-seekbar-container" class="flex items-center gap-2 mt-1 w-full">
+              <span id="current-time-label" class="text-[10px] text-gray-400 font-mono">0:00</span>
+              <input type="range" id="seekbar" min="0" max="100" value="0" class="flex-1 accent-indigo-500 h-1 bg-gray-700 rounded-lg cursor-pointer">
+              <span id="duration-label" class="text-[10px] text-gray-400 font-mono">0:00</span>
+            </div>
           </div>
 
           <!-- Local volume control -->

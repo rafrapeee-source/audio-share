@@ -118,6 +118,29 @@ io.on('connection', (socket) => {
     }
   });
 
+  socket.on('leave-room', () => {
+    // Safely copy socket.rooms to iterate over
+    const activeRooms = Array.from(socket.rooms);
+    for (const roomId of activeRooms) {
+      if (roomId === socket.id) continue;
+
+      const room = rooms[roomId];
+      if (room) {
+        if (room.hostId === socket.id) {
+          // If the leaving user is the host, notify all members to kick them out
+          socket.to(roomId).emit('broadcaster-disconnected');
+          delete rooms[roomId];
+          console.log(`[Room ${roomId}] Host closed the room cleanly.`);
+        } else if (room.listenerIds.has(socket.id)) {
+          // If a member is leaving, notify the host
+          room.listenerIds.delete(socket.id);
+          io.to(room.hostId).emit('listener-left', socket.id);
+        }
+      }
+      socket.leave(roomId);
+    }
+  });
+
   socket.on('request-sync', (roomId) => {
     const room = rooms[roomId];
     if (room) {

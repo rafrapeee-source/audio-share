@@ -394,6 +394,7 @@ function updateQueueUI(queue) {
 
 socket.on('room-not-found', () => {
   alert("Room not found. Check the ID.");
+  leaveRoom();
 });
 
 socket.on('broadcaster-disconnected', () => {
@@ -543,6 +544,10 @@ socket.on('track-resumed', () => {
     statusElement.classList.remove('text-amber-500');
     statusElement.classList.add('text-indigo-400');
   }
+});
+
+socket.on('queue-full-error', (errorMessage) => {
+  alert(errorMessage);
 });
 
 // --- CONTROLS ---
