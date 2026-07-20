@@ -42,8 +42,42 @@ let isUserDragging = false; // Guard flag to halt automated timeline snapping wh
 const btnSolo = document.getElementById('btn-solo'); // Selector for new button
 let isSoloMode = false; // Flag to track if the session is Solo or Multiplayer
 
-const silentAudio = new Audio('data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA');
-silentAudio.loop = true;
+let audioCtx = null;
+let wakeLockOscillator = null;
+
+function enableWakeLock() {
+  if (!audioCtx) {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  }
+  // If the browser suspended the context, wake it up
+  if (audioCtx.state === 'suspended') {
+    audioCtx.resume();
+  }
+  
+  // Prevent duplicate oscillators
+  if (wakeLockOscillator) return;
+
+  // Create an inaudible high-frequency tone (20,000 Hz is usually above adult human hearing)
+  wakeLockOscillator = audioCtx.createOscillator();
+  wakeLockOscillator.type = 'sine';
+  wakeLockOscillator.frequency.value = 20000; 
+  
+  // Turn the volume down to 1% just to be safe
+  const gainNode = audioCtx.createGain();
+  gainNode.gain.value = 0.01; 
+  
+  wakeLockOscillator.connect(gainNode);
+  gainNode.connect(audioCtx.destination);
+  wakeLockOscillator.start();
+}
+
+function disableWakeLock() {
+  if (wakeLockOscillator) {
+    wakeLockOscillator.stop();
+    wakeLockOscillator.disconnect();
+    wakeLockOscillator = null;
+  }
+}
 
 // Standard public STUN server so peers behind NAT can find each other.
 const RTC_CONFIG = {
@@ -154,9 +188,7 @@ btnHost.addEventListener('click', async () => {
 btnSolo.addEventListener('click', () => {
   isSoloMode = true;
 
-  silentAudio.play().catch(err => {
-    console.warn("Silent audio wake-lock was blocked:", err);
-  });
+  enableWakeLock();
 
   // We bypass getDisplayMedia entirely. No audio sharing or tab sharing prompts!
   const roomId = Math.random().toString(36).substring(2, 8).toUpperCase();
@@ -641,8 +673,7 @@ btnNext.addEventListener('click', () => {
 btnLeave.addEventListener('click', leaveRoom);
 
 function leaveRoom() {
-  silentAudio.pause();
-  silentAudio.currentTime = 0;
+  disableWakeLock();
   
   if (role === 'host') {
     ytPlayerIframe.src = '';
