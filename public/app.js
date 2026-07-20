@@ -430,6 +430,34 @@ function updateNowPlayingUI(track) {
 //   };
 // }
 
+// function playVideo(track) {
+//   // Parse and establish boundaries for our seekbar
+//   isUserDragging = false;
+//   elapsedSeconds = 0;
+//   totalDurationSeconds = parseDuration(track.duration);
+
+//   seekbar.max = totalDurationSeconds;
+//   seekbar.value = 0;
+//   currentTimeLabel.textContent = "0:00";
+//   durationLabel.textContent = track.duration || "0:00";
+
+//   const myOrigin = window.location.origin;
+
+//   // Reset local pause toggle states
+//   isPaused = false;
+//   btnPlayPause.textContent = 'Pause';
+
+//   // 1. Define the onload listener FIRST to prevent browser cache race conditions
+//   ytPlayerIframe.onload = () => {
+//     sendPlayerHandshake('listening');
+//     sendPlayerCommand('addEventListener', ['onStateChange']);
+//     sendPlayerCommand('setVolume', [currentVolume]);
+//   };
+
+//   // 2. Set the src SECOND (triggers the load safely)
+//   ytPlayerIframe.src = `https://www.youtube-nocookie.com/embed/${track.videoId}?autoplay=1&rel=0&enablejsapi=1&vq=small&origin=${encodeURIComponent(myOrigin)}`;
+// }
+
 function playVideo(track) {
   // Parse and establish boundaries for our seekbar
   isUserDragging = false;
@@ -441,21 +469,28 @@ function playVideo(track) {
   currentTimeLabel.textContent = "0:00";
   durationLabel.textContent = track.duration || "0:00";
 
-  const myOrigin = window.location.origin;
-
   // Reset local pause toggle states
   isPaused = false;
   btnPlayPause.textContent = 'Pause';
 
-  // 1. Define the onload listener FIRST to prevent browser cache race conditions
-  ytPlayerIframe.onload = () => {
-    sendPlayerHandshake('listening');
-    sendPlayerCommand('addEventListener', ['onStateChange']);
-    sendPlayerCommand('setVolume', [currentVolume]);
-  };
+  // 1. If the iframe is completely empty, load it normally (First Song)
+  if (!ytPlayerIframe.src) {
+    const myOrigin = window.location.origin;
+    
+    ytPlayerIframe.onload = () => {
+      sendPlayerHandshake('listening');
+      sendPlayerCommand('addEventListener', ['onStateChange']);
+      sendPlayerCommand('setVolume', [currentVolume]);
+    };
 
-  // 2. Set the src SECOND (triggers the load safely)
-  ytPlayerIframe.src = `https://www.youtube-nocookie.com/embed/${track.videoId}?autoplay=1&rel=0&enablejsapi=1&vq=small&origin=${encodeURIComponent(myOrigin)}`;
+    ytPlayerIframe.src = `https://www.youtube-nocookie.com/embed/${track.videoId}?autoplay=1&rel=0&enablejsapi=1&vq=small&origin=${encodeURIComponent(myOrigin)}`;
+  } 
+  // 2. If the iframe is already loaded, seamlessly swap the video (All Next Songs)
+  else {
+    // This bypasses the background Autoplay block because the iframe never unloads!
+    sendPlayerCommand('loadVideoById', [track.videoId, 0]);
+    sendPlayerCommand('setVolume', [currentVolume]);
+  }
 }
 
 function updateQueueUI(queue) {
